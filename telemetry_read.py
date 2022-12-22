@@ -5,10 +5,28 @@
 # set udp connection as true and extra_params to 3
 # ~/.local/share/Steam/steamapps/compatdata/690790/pfx/drive_c/users/steamuser/Documents/My Games/DiRT Rally 2.0/hardwaresettings
 
+##################
+## CONFIGURATIONS
+
+HIGH_RPM_PERCENTAGE = 8
+
+SIMULATED_DATA = False # For debugging without real data
+
+# VISUAL OFFSETS
+SHIFT_LIGHT_V_OFFSET = 4
+RPM_V_OFFSET = SHIFT_LIGHT_V_OFFSET + 2
+GEAR_V_OFFSET = RPM_V_OFFSET + 3
+DEBUG_V_OFFSET = GEAR_V_OFFSET
+BUTTONS_V_OFFSET = GEAR_V_OFFSET
+
+## CONFIGURATIONS
+##################
+
 import socket
 import time
 import struct
 import curses
+import random
 # import evdev
 
 time.sleep(3)
@@ -27,14 +45,6 @@ TOTAL_LAPS = 60
 MAX_RPM_POS = 63
 IDLE_RPM_POS = 64
 MAX_GEARS_POS = 65
-
-SHIFT_LIGHT_V_OFFSET = 0
-RPM_V_OFFSET = SHIFT_LIGHT_V_OFFSET + 2
-GEAR_V_OFFSET = RPM_V_OFFSET + 3
-DEBUG_V_OFFSET = GEAR_V_OFFSET
-BUTTONS_V_OFFSET = GEAR_V_OFFSET
-
-HIGH_RPM_PERCENTAGE = 8
 
 HLINE = u'\u2500' # ─
 VLINE = u'\u2502' # │
@@ -113,10 +123,13 @@ def bit_stream_to_float32(data, pos):
 
 
 def draw_interface():
-	draw_rpm_bar()
-	draw_shift_light_bar()
-	draw_gear_bar()
-	draw_buttons()
+	try:
+		draw_rpm_bar()
+		draw_shift_light_bar()
+		draw_gear_bar()
+		# draw_buttons()
+	except curses.error:
+		return
 
 
 def draw_buttons():
@@ -252,8 +265,11 @@ def print_shift_light(rpm):
 		color = BACKGROUND_COLOR
 		shiftlight_window.bkgdset(curses.COLOR_BLACK)
 
-	for i in range(shift_light_v_size):
-		shiftlight_window.addstr(i, 0, FULLBLOCK * (shift_light_h_size - 1), curses.color_pair(color))
+	try:
+		for i in range(shift_light_v_size):
+			shiftlight_window.addstr(i, 0, FULLBLOCK * (shift_light_h_size - 1), curses.color_pair(color))
+	except curses.error:
+		return
 
 
 def draw_rpm_bar():
@@ -292,24 +308,27 @@ def print_rpm(rpm, max_rpm, idle_rpm):
 	rpm_info_v_begin = 1
 	rpm_info_h_begin = 2
 
-	if rpm <= idle_rpm:
-		rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, FULLBLOCK * rpm_size, curses.color_pair(RPM_LOW_COLOR))
-	else:
-		rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, FULLBLOCK * rpm_idle_size, curses.color_pair(RPM_LOW_COLOR))
-		if rpm_size <= rpm_shift_light_size:
-			rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_idle_size, FULLBLOCK * (rpm_size - rpm_idle_size), curses.color_pair(RPM_COLOR))
+	try:
+		if rpm <= idle_rpm:
+			rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, FULLBLOCK * rpm_size, curses.color_pair(RPM_LOW_COLOR))
 		else:
-			rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_idle_size, FULLBLOCK * (rpm_shift_light_size - rpm_idle_size), curses.color_pair(RPM_COLOR))
-			if rpm_size <= rpm_max_size:
-				rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_shift_light_size, FULLBLOCK * (rpm_size - rpm_shift_light_size), curses.color_pair(RPM_HIGH_COLOR))
-			else: # super high RPM
-				fill_background = False
-				rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_shift_light_size, FULLBLOCK * (rpm_max_size - rpm_shift_light_size + 1), curses.color_pair(RPM_HIGH_COLOR))
-				rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_max_size, FULLBLOCK * 1, curses.color_pair(RPM_SUPER_HIGH_COLOR))
+			rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, FULLBLOCK * rpm_idle_size, curses.color_pair(RPM_LOW_COLOR))
+			if rpm_size <= rpm_shift_light_size:
+				rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_idle_size, FULLBLOCK * (rpm_size - rpm_idle_size), curses.color_pair(RPM_COLOR))
+			else:
+				rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_idle_size, FULLBLOCK * (rpm_shift_light_size - rpm_idle_size), curses.color_pair(RPM_COLOR))
+				if rpm_size <= rpm_max_size:
+					rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_shift_light_size, FULLBLOCK * (rpm_size - rpm_shift_light_size), curses.color_pair(RPM_HIGH_COLOR))
+				else: # super high RPM
+					fill_background = False
+					rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_shift_light_size, FULLBLOCK * (rpm_max_size - rpm_shift_light_size + 1), curses.color_pair(RPM_HIGH_COLOR))
+					rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_max_size, FULLBLOCK * 1, curses.color_pair(RPM_SUPER_HIGH_COLOR))
 
-	if fill_background:
-		rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_size, FULLBLOCK * (rpm_max_size - rpm_size + 1), curses.color_pair(BACKGROUND_COLOR))
-	
+		if fill_background:
+			rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_size, FULLBLOCK * (rpm_max_size - rpm_size + 1), curses.color_pair(BACKGROUND_COLOR))
+	except curses.error:
+		return
+
 	# iddle_rpm_h_offset = rpm_info_h_begin + rpm_idle_size - 7
 	# if iddle_rpm_h_offset < 0:
 	# 	iddle_rpm_h_offset = 1
@@ -341,6 +360,94 @@ def recalculate_values(idle_rpm, max_rpm):
 	rpm_shift_light_size = int(rpm_max_size - (rpm_max_size * (HIGH_RPM_PERCENTAGE / 100)))
 
 
+start_time = time.time()
+max_fake_gears = 7
+max_fake_speed = 300
+min_fake_speed = (max_fake_speed / 10) * -1
+speed_by_gear = max_fake_speed / max_fake_gears
+max_rpm_variation = 100
+last_data = {
+	"run_time": 0.0,
+	"lap_time": 0,
+	"speed": 0,
+	"gear": 0,
+	"rpm": 900,
+	"max_rpm": 7000,
+	"idle_rpm": 900,
+	"completed_laps": 0,
+	"total_laps": random.choice([0, 1, 2, 3, 4, 5])
+}
+def generate_fake_data():
+	global last_data
+	global start_time
+
+	time.sleep(0.05)
+	speed = last_data['speed'] + random.choice([-2, -1, 0, 1, 2])
+	run_time = time.time() - start_time
+	completed_laps = last_data['completed_laps'] + (1 if random.randrange(1, 50, 1) == 1 else 0)
+
+	# speed adjust
+	if speed >= max_fake_speed * 2 / 3:
+		speed -= 1
+	elif speed <= max_fake_speed / 10:
+		speed += 1
+	if speed > max_fake_speed:
+		speed = max_fake_speed
+	elif speed < min_fake_speed:
+		speed = min_fake_speed
+	
+	# gear adjust
+	if speed < 0:
+		gear = 0 if last_data['gear'] >= 1 else -1
+	else:
+		gear = 0 if last_data['gear'] < 0 else round(speed / speed_by_gear)
+	
+	# rpm adjust
+	rpm = ((speed % speed_by_gear) / speed_by_gear) * (last_data['max_rpm'] - last_data['idle_rpm']) + last_data['idle_rpm']
+	if rpm + max_rpm_variation > last_data['rpm']:
+		rpm = last_data['rpm'] + max_rpm_variation
+	elif rpm - max_rpm_variation < last_data['rpm']: 
+		rpm = last_data['rpm'] - max_rpm_variation
+	
+	# lap adjust
+	if completed_laps > last_data['total_laps']:
+		completed_laps = 0
+	
+	last_data =  {
+		"run_time": round(run_time, 1),
+		"lap_time": round(run_time, 1),
+		"speed": speed,
+		"gear": gear,
+		"rpm": int(rpm),
+		"max_rpm": last_data['max_rpm'],
+		"idle_rpm": last_data['idle_rpm'],
+		"completed_laps": completed_laps,
+		"total_laps": last_data['total_laps']
+	}
+
+	return last_data
+
+
+def read_data():
+	if SIMULATED_DATA:
+		infos = generate_fake_data()
+	else:
+		data, addr = sock.recvfrom(1024) # buffer size
+		infos = {
+			"run_time": round(bit_stream_to_float32(data, RUN_TIME), 1),
+			"lap_time": round(bit_stream_to_float32(data, LAP_TIME), 1),
+			"speed": round(bit_stream_to_float32(data, SPEED_POS) * 3.6),
+			"gear": int(bit_stream_to_float32(data, GEAR_POS)),
+			"rpm": int(bit_stream_to_float32(data, RPM_POS)),
+			"max_rpm": int(bit_stream_to_float32(data, MAX_RPM_POS)),
+			"idle_rpm": int(bit_stream_to_float32(data, IDLE_RPM_POS)),
+			"completed_laps": int(bit_stream_to_float32(data, COMPLETED_LAPS)),
+			"total_laps": int(bit_stream_to_float32(data, TOTAL_LAPS))
+		}
+
+	return infos
+
+
 def main():
 	global window_rows
 	global window_cols
@@ -354,59 +461,35 @@ def main():
 	mz = 0
 
 	while True:
-		data, addr = sock.recvfrom(1024) # buffer size ...
+		infos = read_data()
 
 		event = window.getch()
 
-		if event == curses.KEY_MOUSE:
-			_id, mx, my, _mz, _bstate = curses.getmouse()
-			button_interaction(mx, my)
+		# if event == curses.KEY_MOUSE:
+		# 	_id, mx, my, _mz, _bstate = curses.getmouse()
+		# 	button_interaction(mx, my)
 
 		position = 0
-		
-		run_time = round(bit_stream_to_float32(data, RUN_TIME), 1)
-		lap_time = round(bit_stream_to_float32(data, LAP_TIME), 1)
-		speed = round(bit_stream_to_float32(data, SPEED_POS) * 3.6)
-		gear = int(bit_stream_to_float32(data, GEAR_POS))
-		rpm = int(bit_stream_to_float32(data, RPM_POS))
-		max_rpm = int(bit_stream_to_float32(data, MAX_RPM_POS))
-		idle_rpm = int(bit_stream_to_float32(data, IDLE_RPM_POS))
-		completed_laps = int(bit_stream_to_float32(data, COMPLETED_LAPS))
-		total_laps = int(bit_stream_to_float32(data, TOTAL_LAPS))
-		tire_pressure_fl = int(bit_stream_to_float32(data, TIRE_PRESSURE_FL))
 
 		resized = curses.is_term_resized(window_rows, window_cols)
 		if resized:
-			recalculate_values(idle_rpm, max_rpm)
+			recalculate_values(infos['idle_rpm'], infos['max_rpm'])
 			draw_interface()
 
-		if last_max_rpm != max_rpm or rpm_max_size == 0:
-			recalculate_values(idle_rpm, max_rpm)
-			last_max_rpm = max_rpm
+		if last_max_rpm != infos['max_rpm'] or rpm_max_size == 0:
+			recalculate_values(infos['idle_rpm'], infos['max_rpm'])
+			last_max_rpm = infos['max_rpm']
 
-		print_shift_light(rpm)
+		print_shift_light(infos['rpm'])
 
-		print_rpm(rpm, max_rpm, idle_rpm)
+		print_rpm(infos['rpm'], infos['max_rpm'], infos['idle_rpm'])
 		rpm_window.refresh()
 		shiftlight_window.refresh()
 		
-		if gear != last_gear:
-			print_gear(gear)
+		if infos['gear'] != last_gear:
+			print_gear(infos['gear'])
 			gear_window.refresh()
-			last_gear = gear
-		
-		infos = {
-			"run_time": run_time,
-			"lap_time": lap_time,
-			"speed": speed,
-			"gear": gear,
-			"rpm": rpm,
-			"max_rpm": max_rpm,
-			"idle_rpm": idle_rpm,
-			"completed_laps": completed_laps,
-			"total_laps": total_laps,
-			"mx_my": str(mx) + ";" + str(my) + ";" + str(mz)
-		}
+			last_gear = infos['gear']
 		
 		debug(infos)
 
@@ -419,10 +502,12 @@ def debug(infos):
 
 	lap_info = "  lap: " + str(infos['lap_time']) + "s | " + str(infos['completed_laps']) + " / " + str(infos['total_laps']) + "      "
 
-	window.addstr(DEBUG_V_OFFSET + 1, gear_h_size + 2, "speed: " + str(infos["speed"]) + " Km/h   ", curses.color_pair(GEAR_COLOR))
-	window.addstr(DEBUG_V_OFFSET + 3, gear_h_size + 2, "total: " + str(infos["run_time"]) + "s   ", curses.color_pair(GEAR_COLOR))
-	window.addstr(DEBUG_V_OFFSET + 4, gear_h_size + 2, lap_info, curses.color_pair(GEAR_COLOR))
-	window.addstr(DEBUG_V_OFFSET + 6, gear_h_size + 2, "mx_my: " + str(infos["mx_my"]) + "   ", curses.color_pair(GEAR_COLOR))
+	try:
+		window.addstr(DEBUG_V_OFFSET + 1, gear_h_size + 2, "speed: " + str(infos["speed"]) + " Km/h   ", curses.color_pair(GEAR_COLOR))
+		window.addstr(DEBUG_V_OFFSET + 3, gear_h_size + 2, "total: " + str(infos["run_time"]) + "s   ", curses.color_pair(GEAR_COLOR))
+		window.addstr(DEBUG_V_OFFSET + 4, gear_h_size + 2, lap_info, curses.color_pair(GEAR_COLOR))
+	except curses.error:
+		return
 
 
 if __name__ == '__main__':

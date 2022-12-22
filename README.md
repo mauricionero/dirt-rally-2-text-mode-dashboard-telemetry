@@ -1,4 +1,4 @@
-Single file python3 script to run a curses interface for a Dirt Rally 2 dashboard
+Single file python3 script to run a curses in text mode interface for a Dirt Rally 2 dashboard. It runs in any command line.
 
 The advantage of this is that you can easily run in any device through SSH, including iPhone and Android.
 
