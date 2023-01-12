@@ -13,11 +13,11 @@ HIGH_RPM_PERCENTAGE = 8
 SIMULATED_DATA = False # For debugging without real data
 
 # VISUAL OFFSETS
-SHIFT_LIGHT_V_OFFSET = 4
-RPM_V_OFFSET = SHIFT_LIGHT_V_OFFSET + 2
+RPM_V_OFFSET = 0
+SHIFT_LIGHT_V_OFFSET = RPM_V_OFFSET + 3
 GEAR_V_OFFSET = RPM_V_OFFSET + 3
-DEBUG_V_OFFSET = GEAR_V_OFFSET
-BUTTONS_V_OFFSET = GEAR_V_OFFSET
+DEBUG_V_OFFSET = 5
+BUTTONS_V_OFFSET = 0
 
 ## CONFIGURATIONS
 ##################
@@ -77,7 +77,7 @@ window_middle = int(window_cols / 2)
 
 gear_window = None
 rpm_window = None
-shiftlight_window = None
+shiftlight_window = [None, None]
 buttons_window = None
 
 rpm_info_size = 0
@@ -109,6 +109,9 @@ curses.init_pair(GEAR_COLOR, curses.COLOR_WHITE, curses.COLOR_BLACK)
 BUTTON_COLOR = 8
 curses.init_pair(BUTTON_COLOR, curses.COLOR_WHITE, curses.COLOR_BLACK)
 
+LEFT = 0
+RIGHT = 1
+
 def bit_stream_to_float32(data, pos):
 	pos *= 4
 	try:
@@ -125,8 +128,9 @@ def bit_stream_to_float32(data, pos):
 def draw_interface():
 	try:
 		draw_rpm_bar()
-		draw_shift_light_bar()
 		draw_gear_bar()
+		draw_shift_light_bar(LEFT)
+		draw_shift_light_bar(RIGHT)
 		# draw_buttons()
 	except curses.error:
 		return
@@ -163,12 +167,14 @@ def draw_gear_bar():
 	global gear_v_size
 	global gear_window
 
-	gear_h_begin = 1
-
 	gear_v_size = 7
 	gear_h_size = 9
 
-	gear_window = window.subwin(gear_v_size, gear_h_size, GEAR_V_OFFSET, gear_h_begin)
+	gear_v_offset = window_rows - GEAR_V_OFFSET - gear_v_size
+
+	gear_h_begin = int(window_middle - (gear_h_size / 2))
+
+	gear_window = window.subwin(gear_v_size, gear_h_size, gear_v_offset, gear_h_begin)
 	gear_window.box()
 	gear_window.refresh()
 
@@ -178,76 +184,86 @@ def print_gear(gear):
 
 	h_offset = 2
 
-	if gear == -1:
-		gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(3, h_offset, "┣━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(4, h_offset, "┃  ╲  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(5, h_offset, "      ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-	elif gear == 0:
-		gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(3, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(4, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(5, h_offset, "┗━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-	elif gear == 1:
-		gear_window.addstr(1, h_offset, " ━┓   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(2, h_offset, "  ┃   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(3, h_offset, "  ┃   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(4, h_offset, "  ┃   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(5, h_offset, " ━┻━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-	elif gear == 2:
-		gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(3, h_offset, "┏━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(4, h_offset, "┃     ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(5, h_offset, "┗━━━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-	elif gear == 3:
-		gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(3, h_offset, " ━━━┫ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(5, h_offset, " ━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-	elif gear == 4:
-		gear_window.addstr(1, h_offset, "╻   ╻ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(3, h_offset, "┗━━━┫ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(5, h_offset, "    ╹ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-	elif gear == 5:
-		gear_window.addstr(1, h_offset, "┏━━━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(2, h_offset, "┃     ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(3, h_offset, "┗━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(5, h_offset, " ━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-	elif gear == 6 :
-		gear_window.addstr(1, h_offset, "┏━━━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(2, h_offset, "┃     ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(3, h_offset, "┣━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(4, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(5, h_offset, "┗━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-	elif gear == 7:
-		gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(3, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		gear_window.addstr(5, h_offset, "    ╹ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+	try:
+		if gear == -1:
+			gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(3, h_offset, "┣━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(4, h_offset, "┃  ╲  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(5, h_offset, "      ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+		elif gear == 0:
+			gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(3, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(4, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(5, h_offset, "┗━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+		elif gear == 1:
+			gear_window.addstr(1, h_offset, " ━┓   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(2, h_offset, "  ┃   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(3, h_offset, "  ┃   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(4, h_offset, "  ┃   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(5, h_offset, " ━┻━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+		elif gear == 2:
+			gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(3, h_offset, "┏━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(4, h_offset, "┃     ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(5, h_offset, "┗━━━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+		elif gear == 3:
+			gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(3, h_offset, " ━━━┫ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(5, h_offset, " ━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+		elif gear == 4:
+			gear_window.addstr(1, h_offset, "╻   ╻ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(3, h_offset, "┗━━━┫ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(5, h_offset, "    ╹ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+		elif gear == 5:
+			gear_window.addstr(1, h_offset, "┏━━━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(2, h_offset, "┃     ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(3, h_offset, "┗━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(5, h_offset, " ━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+		elif gear == 6 :
+			gear_window.addstr(1, h_offset, "┏━━━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(2, h_offset, "┃     ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(3, h_offset, "┣━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(4, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(5, h_offset, "┗━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+		elif gear == 7:
+			gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(3, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+			gear_window.addstr(5, h_offset, "    ╹ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
+	except curses.error:
+		return
 
-def draw_shift_light_bar():
+def draw_shift_light_bar(side):
 	global window_cols
+	global window_rows
 	global window_middle
 	global shift_light_h_size
 	global shift_light_v_size
+	global gear_h_size
 	global shift_light_h_begin
 	global shiftlight_window
 
-	shift_light_h_size = int(window_cols / 2)
-	shift_light_v_size = 2
+	shift_light_h_size = 5
+	shift_light_v_size = 6
 
-	shift_light_h_begin = int(window_middle - (shift_light_h_size / 2))
+	if side == LEFT:
+		shift_light_h_begin = int(window_middle - (gear_h_size / 2) - shift_light_h_size)
+	else: # RIGHT
+		shift_light_h_begin = int(window_middle + (gear_h_size / 2))
 
-	shiftlight_window = window.subwin(shift_light_v_size, shift_light_h_size, SHIFT_LIGHT_V_OFFSET, shift_light_h_begin)
-	shiftlight_window.refresh()
+	shift_light_v_offset = window_rows - SHIFT_LIGHT_V_OFFSET - shift_light_v_size
+
+	shiftlight_window[side] = window.subwin(shift_light_v_size, shift_light_h_size, shift_light_v_offset, shift_light_h_begin)
+	shiftlight_window[side].refresh()
 
 
 def print_shift_light(rpm):
@@ -260,29 +276,35 @@ def print_shift_light(rpm):
 
 	if rpm >= rpm_shift_light:
 		color = RPM_HIGH_COLOR
-		shiftlight_window.bkgdset(curses.COLOR_RED)
+		shiftlight_window[LEFT].bkgdset(curses.COLOR_RED)
+		shiftlight_window[RIGHT].bkgdset(curses.COLOR_RED)
 	else:
 		color = BACKGROUND_COLOR
-		shiftlight_window.bkgdset(curses.COLOR_BLACK)
+		shiftlight_window[LEFT].bkgdset(curses.COLOR_BLACK)
+		shiftlight_window[RIGHT].bkgdset(curses.COLOR_BLACK)
 
 	try:
-		for i in range(shift_light_v_size):
-			shiftlight_window.addstr(i, 0, FULLBLOCK * (shift_light_h_size - 1), curses.color_pair(color))
+		for i in range(shift_light_v_size-1):
+			shiftlight_window[LEFT].addstr(i, 0, FULLBLOCK * shift_light_h_size, curses.color_pair(color))
+			shiftlight_window[RIGHT].addstr(i, 0, FULLBLOCK * shift_light_h_size, curses.color_pair(color))
 	except curses.error:
 		return
 
 
 def draw_rpm_bar():
 	global window_cols
+	global window_rows
 	global rpm_info_size
 	global rpm_window
 
 	rpm_h_begin = 1
 
 	rpm_v_size = 3
-	rpm_h_size = window_cols - 2
+	rpm_h_size = window_cols - 4
 
-	rpm_window = window.subwin(rpm_v_size, rpm_h_size, RPM_V_OFFSET, rpm_h_begin)
+	rpm_v_offset = window_rows - rpm_v_size - RPM_V_OFFSET
+
+	rpm_window = window.subwin(rpm_v_size, rpm_h_size, rpm_v_offset, rpm_h_begin)
 	rpm_window.box()
 
 	# rpm_window.addstr(1, 1, "   ", curses.color_pair(RPM_INFO_COLOR) | curses.A_BOLD)
@@ -484,7 +506,8 @@ def main():
 
 		print_rpm(infos['rpm'], infos['max_rpm'], infos['idle_rpm'])
 		rpm_window.refresh()
-		shiftlight_window.refresh()
+		shiftlight_window[LEFT].refresh()
+		shiftlight_window[RIGHT].refresh()
 		
 		if infos['gear'] != last_gear:
 			print_gear(infos['gear'])
@@ -499,13 +522,19 @@ def main():
 
 def debug(infos):
 	global gear_h_size
+	global window_rows
+	global rpm_v_size
 
 	lap_info = "  lap: " + str(infos['lap_time']) + "s | " + str(infos['completed_laps']) + " / " + str(infos['total_laps']) + "      "
 
+	debug_v_size = 4
+	debug_h_begin = 3
+	debug_v_begin = window_rows - RPM_V_OFFSET - 4 - debug_v_size
+
 	try:
-		window.addstr(DEBUG_V_OFFSET + 1, gear_h_size + 2, "speed: " + str(infos["speed"]) + " Km/h   ", curses.color_pair(GEAR_COLOR))
-		window.addstr(DEBUG_V_OFFSET + 3, gear_h_size + 2, "total: " + str(infos["run_time"]) + "s   ", curses.color_pair(GEAR_COLOR))
-		window.addstr(DEBUG_V_OFFSET + 4, gear_h_size + 2, lap_info, curses.color_pair(GEAR_COLOR))
+		window.addstr(debug_v_begin + 1, debug_h_begin, "speed: " + str(infos["speed"]) + " Km/h   ", curses.color_pair(GEAR_COLOR))
+		window.addstr(debug_v_begin + 3, debug_h_begin, "total: " + str(infos["run_time"]) + "s   ", curses.color_pair(GEAR_COLOR))
+		window.addstr(debug_v_begin + 4, debug_h_begin, lap_info, curses.color_pair(GEAR_COLOR))
 	except curses.error:
 		return
 
