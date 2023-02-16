@@ -1,0 +1,342 @@
+#!/usr/bin/python3
+
+import socket
+import sys
+import struct
+import RPi.GPIO as GPIO
+import signal
+import time
+import subprocess
+
+SERVER_PORT = 20778
+SERVER_IP = None
+sock = None
+
+HIGH_RPM_PERCENTAGE_POS = 0
+HIGH_RPM_PERCENTAGE_STEPS = 1
+RPM_POS = 2
+MAX_RPM_POS = 3
+POSITION_X_POS = 4
+POSITION_Y_POS = 5
+POSITION_Z_POS = 6
+G_FORCE_LAT_POS = 7
+G_FORCE_LON_POS = 8
+
+GREEN_LED = 22
+YELLOW_LED = 27
+MAIN_RED_LED = 17
+RED_LED = 4
+GPIO_HIGH_LED = [RED_LED, MAIN_RED_LED, YELLOW_LED, GREEN_LED]
+
+print("Configuring...")
+# setup gpio
+GPIO.setmode(GPIO.BCM)
+
+for gpio_led in GPIO_HIGH_LED:
+	GPIO.setup(gpio_led, GPIO.OUT)
+
+GPIO.output(GREEN_LED, GPIO.HIGH)
+
+# arguments
+i = 0
+for arg in sys.argv:
+	if arg == "-i":
+		SERVER_IP = sys.argv[i + 1]
+	i += 1
+
+# self IP
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(("8.8.8.8", 80))
+SELF_LAN_IP = s.getsockname()[0]
+print("	Self IP:", SELF_LAN_IP)
+s.close()
+
+# find IP
+NETWORK_IPS = []
+if not SERVER_IP:
+	print('	Getting network ips')
+	NETWORK_IPS = subprocess.check_output(['/home/pi/bin/network_ips'], shell=True, text=True)
+	NETWORK_IPS = NETWORK_IPS.splitlines()
+
+max_g_force_lat = 0
+max_g_force_lon = 0
+min_g_force_lat = 0
+min_g_force_lon = 0
+last_max_rpm = None
+rpm_shift_light = None
+rpm_shift_light_step = None
+
+GPIO.output(GREEN_LED, GPIO.LOW)
+
+def try_to_connect_socket():
+	global sock
+	global SERVER_IP
+
+	clear_output()
+
+	GPIO.output(YELLOW_LED, GPIO.HIGH)
+
+	found = False
+
+	if sock != None:
+		sock.close()
+	sock = socket.socket()
+	
+	server_port_now = SERVER_PORT
+
+	while True:
+		if found:
+			break
+		# connect to specific ip
+		if SERVER_IP:
+			print("Trying to connect to", SERVER_IP, ":", server_port_now)
+			try:
+				GPIO.output(YELLOW_LED, GPIO.LOW)
+				time.sleep(0.1)
+				GPIO.output(YELLOW_LED, GPIO.HIGH)
+				sock.connect((SERVER_IP, server_port_now))
+				found = True
+				print("Connected to:", SERVER_IP, ":", server_port_now)
+				break
+			except:
+				None
+		
+		# try connect to all known network ips
+		else:
+			for ip in NETWORK_IPS:
+				print("trying to connect to:", ip, ":", server_port_now)
+				try:
+					GPIO.output(YELLOW_LED, GPIO.LOW)
+					time.sleep(0.1)
+					GPIO.output(YELLOW_LED, GPIO.HIGH)
+					sock.connect((ip, server_port_now))  # connect to specific ip
+					SERVER_IP = ip
+					found = True
+					print("Connected to:", ip, ":", server_port_now)
+					break
+				except:
+					continue
+		time.sleep(2)
+
+		# alternate between ports SERVER_PORT and SERVER_PORT + 1
+		server_port_now = server_port_now + 1 if server_port_now == SERVER_PORT else SERVER_PORT
+
+	GPIO.output(YELLOW_LED, GPIO.LOW)
+	GPIO.output(GREEN_LED, GPIO.HIGH)
+
+	time.sleep(0.7)
+	GPIO.output(GREEN_LED, GPIO.LOW)
+	clear_output()
+
+
+def bit_stream_to_float32(data, pos):
+	byte_size = 4
+	pos *= byte_size
+	try:
+		value = struct.unpack('f', data[pos:pos+byte_size])[0]
+	except struct.error as _:
+		value = 0
+		# print('Failed to get data item at pos {}'.format(pos))
+	except Exception as e:
+		value = 0
+		# print('Failed to get data item at pos {}. Make sure to set extradata=3 in the hardware settings.'.format(pos))
+	return value
+
+
+def read_data():
+	global sock
+
+	print('====sock')
+	print(sock)
+
+	try:
+		data, addr = sock.recvfrom(1024) # buffer size
+
+		if data == b'':
+			try_to_connect_socket()
+
+		infos = {
+			"high_rpm_percentage": int(bit_stream_to_float32(data, HIGH_RPM_PERCENTAGE_POS)),
+			"high_rpm_percentage_steps": int(bit_stream_to_float32(data, HIGH_RPM_PERCENTAGE_STEPS)),
+			"g_force_lat": round(bit_stream_to_float32(data, G_FORCE_LAT_POS), 2),
+			"g_force_lon": round(bit_stream_to_float32(data, G_FORCE_LON_POS), 2),
+			"max_rpm": int(bit_stream_to_float32(data, MAX_RPM_POS)),
+			"rpm": round(bit_stream_to_float32(data, RPM_POS), 2),
+			"position_x": round(bit_stream_to_float32(data, POSITION_X_POS), 3),
+			"position_y": round(bit_stream_to_float32(data, POSITION_Y_POS), 3),
+			"position_z": round(bit_stream_to_float32(data, POSITION_Z_POS), 3),
+		}
+	except:
+		print("====read_data except")
+		try_to_connect_socket()
+
+	return infos
+
+
+def recalculate_values(infos):
+	global max_g_force_lat
+	global max_g_force_lon
+	global min_g_force_lat
+	global min_g_force_lon
+	global rpm_shift_light
+	global rpm_shift_light_step
+
+	max_g_force_lat = 0
+	max_g_force_lon = 0
+	min_g_force_lat = 0
+	min_g_force_lon = 0
+	rpm_shift_light = int(infos['max_rpm'] - (infos['max_rpm'] * (infos['high_rpm_percentage'] / 100)))
+	rpm_shift_light_step = int(infos['max_rpm'] * (infos['high_rpm_percentage_steps'] / 100))
+
+
+def clear_output():
+	for gpio_led in GPIO_HIGH_LED:
+		GPIO.output(gpio_led, GPIO.LOW)
+
+
+last_shift_light_states = []
+clear_state = False
+for gpio_led in GPIO_HIGH_LED:
+	last_shift_light_states.append(None)
+def shift_light(infos):
+	global last_shift_light_states
+	global rpm_shift_light
+	global rpm_shift_light_step
+	global clear_state
+
+	# print('clear_state', clear_state)
+	# print("infos['rpm']", infos['rpm'])
+
+	# if not running (the car in the game)
+	if infos['rpm'] <= 0:
+		# if already cleared
+		if clear_state:
+			return
+		# if not cleared yet, clear
+		else:
+			clear_output()
+			# mark as cleared
+			clear_state = True
+			return
+
+	# if starts running and has a cleared state, unclear
+	elif clear_state:
+		clear_state = False
+
+	step_count = 0
+	for gpio_led in GPIO_HIGH_LED:
+		this_rpm_shift_light_step = rpm_shift_light - (rpm_shift_light_step * (step_count - 1))
+		this_shift_light_state = True if infos['rpm'] >= this_rpm_shift_light_step else False
+
+		if this_shift_light_state != last_shift_light_states[step_count]:
+			GPIO.output(gpio_led, GPIO.HIGH if this_shift_light_state else GPIO.LOW)
+			last_shift_light_states[step_count] = this_shift_light_state
+		step_count += 1
+
+
+last_y_1 = 0
+last_y_2 = 0
+def vibration(infos):
+	global last_y_1
+	global last_y_2
+
+	delta_y_1 = round(infos['position_y'] - last_y_1, 3)
+	delta_y_2 = round(last_y_1 - last_y_2, 3)
+	abs_delta = abs(delta_y_1 - delta_y_2)
+	if abs_delta >= 0.007:
+		vibrate = "7█"
+	elif abs_delta >= 0.006:
+		vibrate = "6▉"
+	elif abs_delta >= 0.005:
+		vibrate = "5▊"
+	elif abs_delta >= 0.004:
+		vibrate = "4▋"
+	elif abs_delta >= 0.003:
+		vibrate = "3▌"
+	elif abs_delta >= 0.002:
+		vibrate = "2▍"
+	elif abs_delta >= 0.001:
+		vibrate = "1▎"
+	else:
+		vibrate = "0 "
+
+	# print("position: ", infos['position_x'], infos['position_y'], infos['position_z'], "      ")
+	# print("vibration: ", vibrate, "{:.3f}".format(last_y_1), "{:.3f}".format(last_y_2), "=", "{:.3f}".format(delta_y_1), "{:.3f}".format(delta_y_2), "{:.3f}".format(abs_delta), "   ")
+	# print("g_force_lat: ", infos['g_force_lat'], "|", min_g_force_lat, "|", max_g_force_lat, "   ")
+	# print("g_force_lon: ", infos['g_force_lon'], "|", min_g_force_lon, "|", max_g_force_lon, "   ")
+
+	print(vibrate)
+
+	last_y_2 = last_y_1
+	last_y_1 = infos['position_y']
+
+
+def hello():
+	for gpio_led in reversed(GPIO_HIGH_LED):
+		GPIO.output(gpio_led, GPIO.HIGH)
+		time.sleep(0.1)
+	
+	for _ in range(5):
+		GPIO.output(RED_LED, GPIO.LOW)
+		time.sleep(0.06)
+		GPIO.output(RED_LED, GPIO.HIGH)
+		time.sleep(0.04)
+	
+	time.sleep(0.5)
+
+	for gpio_led in GPIO_HIGH_LED:
+		GPIO.output(gpio_led, GPIO.LOW)
+		time.sleep(0.1)
+
+
+def main():
+	global max_g_force_lat
+	global max_g_force_lon
+	global min_g_force_lat
+	global min_g_force_lon
+	global last_max_rpm
+	global sock
+
+	clear_output()
+
+	try_to_connect_socket()
+
+	hello()
+	
+	while True:
+		# print("_____")
+
+		infos = read_data()
+
+		if last_max_rpm != infos['max_rpm']:
+			recalculate_values(infos)
+			last_max_rpm = infos['max_rpm']
+
+		# if infos['g_force_lat'] > max_g_force_lat:
+		# 	max_g_force_lat = infos['g_force_lat']
+
+		# if infos['g_force_lon'] > max_g_force_lon:
+		# 	max_g_force_lon = infos['g_force_lon']
+
+		# if infos['g_force_lat'] < min_g_force_lat:
+		# 	min_g_force_lat = infos['g_force_lat']
+
+		# if infos['g_force_lon'] < min_g_force_lon:
+		# 	min_g_force_lon = infos['g_force_lon']
+
+		shift_light(infos)
+		vibration(infos)
+
+
+def exit_gracefully(*args):
+	sock.close()
+	GPIO.cleanup()
+	exit(0)
+
+
+if __name__ == '__main__':
+	for sig in (signal.SIGABRT, signal.SIGILL, signal.SIGINT, signal.SIGSEGV, signal.SIGTERM):
+		signal.signal(sig, exit_gracefully)
+	main()
+	sock.close()
+	GPIO.cleanup()

@@ -1,0 +1,3 @@
+#!//bin/bash
+
+arp -e | tail -n +2 | grep -v incomplete | awk '{print $1}'

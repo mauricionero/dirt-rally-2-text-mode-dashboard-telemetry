@@ -1,16 +1,19 @@
 #!/usr/bin/python3
 
-# reference: https://gist.github.com/adrianjost/7673ca97c15f5b9e05c3af94b660b6c4
+# reference: https://steamcommunity.com/app/310560/discussions/0/481115363869500839/?l=norwegian
 
 # set udp connection as true and extra_params to 3
 # ~/.local/share/Steam/steamapps/compatdata/690790/pfx/drive_c/users/steamuser/Documents/My Games/DiRT Rally 2.0/hardwaresettings
+# /media/m2ssd/games/steam/steamapps/compatdata/690790/pfx/drive_c/users/steamuser/Documents/My Games/DiRT Rally 2.0/hardwaresettings
 
 ##################
 ## CONFIGURATIONS
 
-HIGH_RPM_PERCENTAGE = 8
+HIGH_RPM_PERCENTAGE = 7
+HIGH_RPM_PERCENTAGE_STEPS = 2
 
-SIMULATED_DATA = False # For debugging without real data
+SIMULATED_DATA = True # For debugging without real data (fake random data will be generated (with some order))
+FAKE_DATA_INTERVAL = 0.1
 
 # VISUAL OFFSETS
 RPM_V_OFFSET = 0
@@ -18,6 +21,8 @@ SHIFT_LIGHT_V_OFFSET = RPM_V_OFFSET + 3
 GEAR_V_OFFSET = RPM_V_OFFSET + 3
 DEBUG_V_OFFSET = 5
 BUTTONS_V_OFFSET = 0
+
+INITIAL_SLEEP = 3 # seconds
 
 ## CONFIGURATIONS
 ##################
@@ -27,17 +32,33 @@ import time
 import struct
 import curses
 import random
+import sys
+import psutil
+import signal
 # import evdev
-
-time.sleep(3)
 
 DIRT_IP = ""
 DIRT_PORT = 20777
+RESEND_PORT = 20778
+
+# arguments
+resend_infos = False
+for arg in sys.argv:
+	if arg == "-s": # act as server, resend infos in RESEND_PORT port
+		resend_infos = True
 
 RUN_TIME = 0
 LAP_TIME = 1
+POSITION_X = 4
+POSITION_Y = 5
+POSITION_Z = 6
 SPEED_POS = 7
+PITCH_X = 14
+PITCH_Y = 15
+PITCH_Z = 16
 GEAR_POS = 33
+G_FORCE_LAT = 34
+G_FORCE_LON = 35
 RPM_POS = 37
 TIRE_PRESSURE_FL = 57
 COMPLETED_LAPS = 59
@@ -46,12 +67,6 @@ MAX_RPM_POS = 63
 IDLE_RPM_POS = 64
 MAX_GEARS_POS = 65
 
-HLINE = u'\u2500' # ─
-VLINE = u'\u2502' # │
-TRLINE = u'\u2510' # ┐
-TLLINE = u'\u250C' # ┌
-BLLINE = u'\u2514' # └
-BRLINE = u'\u2518' # ┘
 FULLBLOCK = u'\u2588' # █
 SHADEBLOCK = u'\u2592' # ▒
 
@@ -62,8 +77,40 @@ SHADEBLOCK = u'\u2592' # ▒
 
 # device = evdev.InputDevice('/dev/input/event22')
 
+# find self IP
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.connect(("8.8.8.8", 80))
+SELF_LAN_IP = s.getsockname()[0]
+s.close()
+
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+# nics = psutil.net_if_addrs()
+# for nic in nics:
+# 	for snicaddr in nics[nic]:
+# 		if snicaddr.family == socket.AF_INET and snicaddr.netmask == '255.255.255.0':
+# 			SELF_LAN_IP = snicaddr.address
+# 			break
+
 sock.bind((DIRT_IP, DIRT_PORT))
+
+if resend_infos:
+	ss = socket.socket()
+	try:
+		ss.bind((SELF_LAN_IP, RESEND_PORT))
+	except:
+		RESEND_PORT += 1
+		ss.bind((SELF_LAN_IP, RESEND_PORT))
+	print("Configured connection to receive from:", SELF_LAN_IP, ":", RESEND_PORT)
+	ss.listen(2)
+	try:
+		cc, addr = ss.accept()
+	except socket.timeout:
+		pass
+	print("Socket Up and running with a connection from ", addr)
+	time.sleep(1)
+
+time.sleep(INITIAL_SLEEP)
 
 window = curses.initscr()
 window.nodelay(True)
@@ -112,10 +159,16 @@ curses.init_pair(BUTTON_COLOR, curses.COLOR_WHITE, curses.COLOR_BLACK)
 LEFT = 0
 RIGHT = 1
 
+
+def read_data_position(data, pos, byte_size):
+	return data[pos:pos+byte_size]
+
+
 def bit_stream_to_float32(data, pos):
-	pos *= 4
+	byte_size = 4
+	pos *= byte_size
 	try:
-		value = struct.unpack('f', data[pos:pos+4])[0]
+		value = struct.unpack('f', read_data_position(data, pos, byte_size))[0]
 	except struct.error as _:
 		value = 0
 		# print('Failed to get data item at pos {}'.format(pos))
@@ -397,14 +450,22 @@ last_data = {
 	"max_rpm": 7000,
 	"idle_rpm": 900,
 	"completed_laps": 0,
-	"total_laps": random.choice([0, 1, 2, 3, 4, 5])
+	"total_laps": random.choice([0, 1, 2, 3, 4, 5]),
+	"position_x": 0.0,
+	"position_y": 0.0,
+	"position_z": 0.0,
+	"g_force_lat": 0.0,
+	"g_force_lon": 0.0,
+	"speed_x": 0,
+	"speed_y": 0
 }
 def generate_fake_data():
 	global last_data
 	global start_time
 
-	time.sleep(0.05)
-	speed = last_data['speed'] + random.choice([-2, -1, 0, 1, 2])
+	time.sleep(FAKE_DATA_INTERVAL)
+	delta_speed = random.choice([-2, -1, 0, 1, 2])
+	speed = last_data['speed'] + delta_speed
 	run_time = time.time() - start_time
 	completed_laps = last_data['completed_laps'] + (1 if random.randrange(1, 50, 1) == 1 else 0)
 
@@ -435,6 +496,16 @@ def generate_fake_data():
 	if completed_laps > last_data['total_laps']:
 		completed_laps = 0
 	
+	# position
+	delta_x = delta_speed * random.uniform(0, 1)
+	position_x = last_data['position_x'] + delta_x
+	position_y = last_data['position_y'] + random.choice([-0.003, -0.002, -0.001, -0.001, 0, 0, 0, 0.01, 0.001, 0.002, 0.003])
+	position_z = last_data['position_z'] + delta_speed - delta_x
+
+	# g forces
+	g_force_lat = random.uniform(0, 1)/10
+	g_force_lon = random.uniform(0, 1)/10
+	
 	last_data =  {
 		"run_time": round(run_time, 1),
 		"lap_time": round(run_time, 1),
@@ -444,10 +515,38 @@ def generate_fake_data():
 		"max_rpm": last_data['max_rpm'],
 		"idle_rpm": last_data['idle_rpm'],
 		"completed_laps": completed_laps,
-		"total_laps": last_data['total_laps']
+		"total_laps": last_data['total_laps'],
+		"position_x": position_x,
+		"position_y": position_y,
+		"position_z": position_z,
+		"g_force_lat": g_force_lat,
+		"g_force_lon": g_force_lon
 	}
 
 	return last_data
+
+
+def send_info_socket(infos):
+	global cc
+	global addr
+
+	ret_data = [
+		HIGH_RPM_PERCENTAGE,
+		HIGH_RPM_PERCENTAGE_STEPS,
+		infos['rpm'],
+		infos['max_rpm'],
+		infos['position_x'],
+		infos['position_y'],
+		infos['position_z'],
+		infos['g_force_lat'],
+		infos['g_force_lon']
+	]
+
+	try:
+		cc.send(struct.pack('<9f',*ret_data))
+	except Exception as e:
+		print(e)
+		cc, addr = ss.accept()
 
 
 def read_data():
@@ -464,8 +563,16 @@ def read_data():
 			"max_rpm": int(bit_stream_to_float32(data, MAX_RPM_POS)),
 			"idle_rpm": int(bit_stream_to_float32(data, IDLE_RPM_POS)),
 			"completed_laps": int(bit_stream_to_float32(data, COMPLETED_LAPS)),
-			"total_laps": int(bit_stream_to_float32(data, TOTAL_LAPS))
+			"total_laps": int(bit_stream_to_float32(data, TOTAL_LAPS)),
+			"position_x": round(bit_stream_to_float32(data, POSITION_X), 3),
+			"position_y": round(bit_stream_to_float32(data, POSITION_Y), 3),
+			"position_z": round(bit_stream_to_float32(data, POSITION_Z), 3),
+			"g_force_lat": round(bit_stream_to_float32(data, G_FORCE_LAT), 3),
+			"g_force_lon": round(bit_stream_to_float32(data, G_FORCE_LON), 3)
 		}
+
+	if resend_infos:
+		send_info_socket(infos)
 
 	return infos
 
@@ -482,8 +589,18 @@ def main():
 	my = 0
 	mz = 0
 
+	# skip_frame_count = 0
+
 	while True:
 		infos = read_data()
+
+		# skip_frame_count += 1
+
+		# small optimization, process only every 2 data received
+		# if skip_frame_count % 2 == 0:
+		# 	skip_frame_count = 0
+		# else:
+		# 	next
 
 		event = window.getch()
 
@@ -539,5 +656,17 @@ def debug(infos):
 		return
 
 
+def exit_gracefully(*args):
+	global sock
+	global ss
+
+	sock.close()
+	ss.close()
+	exit(0)
+
 if __name__ == '__main__':
-  main()
+	for sig in (signal.SIGABRT, signal.SIGILL, signal.SIGINT, signal.SIGSEGV, signal.SIGTERM):
+		signal.signal(sig, exit_gracefully)
+	main()
+	ss.close()
+	sock.close()
