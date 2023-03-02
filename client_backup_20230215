@@ -1,0 +1,346 @@
+#!/usr/bin/python3
+
+import socket
+import sys
+import struct
+import RPi.GPIO as GPIO
+import signal
+import time
+import subprocess
+
+SERVER_PORT = 20778
+
+HIGH_RPM_PERCENTAGE_POS = 0
+HIGH_RPM_PERCENTAGE_STEPS = 1
+RPM_POS = 2
+MAX_RPM_POS = 3
+POSITION_X_POS = 4
+POSITION_Y_POS = 5
+POSITION_Z_POS = 6
+G_FORCE_LAT_POS = 7
+G_FORCE_LON_POS = 8
+
+
+# arguments
+i = 0
+for arg in sys.argv:
+	if arg == "-i":
+		SERVER_IP = sys.argv[i + 1]
+	i += 1
+
+
+class Debug:
+	def p(value):
+		print(value)
+
+
+class GpioCalls:
+	def setup():
+		# setup gpio
+		GPIO.setmode(GPIO.BCM)
+	
+	def output(pin, value):
+		GPIO.output(pin, value)
+	
+	def blink(pin, sleep_time):
+		GpioCalls.output(pin, GPIO.HIGH)
+		time.sleep(sleep_time)
+		GpioCalls.output(pin, GPIO.LOW)
+	
+	def inverted_blink(pin, sleep_time):
+		GpioCalls.output(pin, GPIO.LOW)
+		time.sleep(sleep_time)
+		GpioCalls.output(pin, GPIO.HIGH)
+	
+	def hello():
+		for gpio_led in reversed(RpmLeds.GPIO_HIGH_LED):
+			GpioCalls.output(gpio_led, GPIO.HIGH)
+			time.sleep(0.1)
+		
+		for _ in range(5):
+			GpioCalls.output(RpmLeds.RED_LED, GPIO.LOW)
+			time.sleep(0.06)
+			GpioCalls.output(RpmLeds.RED_LED, GPIO.HIGH)
+			time.sleep(0.04)
+		
+		time.sleep(0.5)
+
+		for gpio_led in RpmLeds.GPIO_HIGH_LED:
+			GpioCalls.output(gpio_led, GPIO.LOW)
+			time.sleep(0.1)
+
+
+class RpmLeds:
+	GREEN_LED = 22
+	YELLOW_LED = 27
+	MAIN_RED_LED = 17
+	RED_LED = 4
+	GPIO_HIGH_LED = [RED_LED, MAIN_RED_LED, YELLOW_LED, GREEN_LED]
+
+	def setup():
+		for gpio_led in RpmLeds.GPIO_HIGH_LED:
+			GPIO.setup(gpio_led, GPIO.OUT)
+
+	def clear_output():
+		for gpio_led in RpmLeds.GPIO_HIGH_LED:
+			GpioCalls.output(gpio_led, GPIO.LOW)
+
+
+class DataComunication:
+	self_lan_ip = None
+	network_ips = None
+	server_ip = None
+	sock = None
+	data = None
+
+	def get_self_lan_ip():
+		if self_lan_ip:
+			return self_lan_ip
+		
+		# self IP
+		s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		s.connect(("8.8.8.8", 80))
+		self_lan_ip = s.getsockname()[0]
+		s.close()
+		return self_lan_ip
+	
+	def get_network_ips():
+		if DataComunication.network_ips:
+			return DataComunication.network_ips
+		
+		DataComunication.network_ips = subprocess.check_output(['/home/pi/bin/network_ips'], shell=True, text=True)
+		DataComunication.network_ips = DataComunication.network_ips.splitlines()
+
+		return DataComunication.network_ips
+
+	def try_to_connect_socket(self):
+		RpmLeds.clear_output()
+
+		GpioCalls.output(RpmLeds.YELLOW_LED, GPIO.HIGH)
+
+		found = False
+
+		if DataComunication.sock != None:
+			DataComunication.sock.close()
+		DataComunication.sock = socket.socket()
+		
+		server_port_now = SERVER_PORT
+
+		while True:
+			if found:
+				break
+			# connect to specific ip
+			if DataComunication.server_ip:
+				Debug.p("Trying to connect to %s : %s" %(DataComunication.server_ip, server_port_now))
+				try:
+					GpioCalls.inverted_blink(RpmLeds.YELLOW_LED, 0.1)
+					DataComunication.sock.connect((DataComunication.server_ip, server_port_now))
+					found = True
+					Debug.p("Connected to %s : %s" %(DataComunication.server_ip, server_port_now))
+					break
+				except:
+					None
+			
+			# try connect to all known network ips
+			else:
+				for ip in DataComunication.get_network_ips():
+					Debug.p("Trying to connect to %s : %s" %(ip, server_port_now))
+					try:
+						GpioCalls.inverted_blink(RpmLeds.YELLOW_LED, 0.1)
+						DataComunication.sock.connect((ip, server_port_now))  # connect to specific ip
+						DataComunication.server_ip = ip
+						found = True
+						Debug.p("Connected to %s : %s" %(ip, server_port_now))
+						break
+					except:
+						continue
+			time.sleep(2)
+
+			# alternate between ports SERVER_PORT and SERVER_PORT + 1
+			server_port_now = server_port_now + 1 if server_port_now == SERVER_PORT else SERVER_PORT
+
+		GpioCalls.output(RpmLeds.YELLOW_LED, GPIO.LOW)
+		GpioCalls.output(RpmLeds.GREEN_LED, GPIO.HIGH)
+
+		time.sleep(0.7)
+		GpioCalls.output(RpmLeds.GREEN_LED, GPIO.LOW)
+		RpmLeds.clear_output()
+
+	def bit_stream_to_float32(self, pos):
+		byte_size = 4
+		pos *= byte_size
+		try:
+			value = struct.unpack('f', self.data[pos:pos+byte_size])[0]
+		except struct.error as _:
+			value = 0
+			# print('Failed to get data item at pos {}'.format(pos))
+		except Exception as e:
+			value = 0
+			# print('Failed to get data item at pos {}. Make sure to set extradata=3 in the hardware settings.'.format(pos))
+		return value
+
+	def read_data(self):
+		infos = {}
+
+		try:
+			self.data, _addr = DataComunication.sock.recvfrom(1024) # buffer size
+
+			if self.data == b'':
+				self.try_to_connect_socket()
+
+			infos = {
+				"high_rpm_percentage": int(self.bit_stream_to_float32(HIGH_RPM_PERCENTAGE_POS)),
+				"high_rpm_percentage_steps": int(self.bit_stream_to_float32(HIGH_RPM_PERCENTAGE_STEPS)),
+				"g_force_lat": round(self.bit_stream_to_float32(G_FORCE_LAT_POS), 2),
+				"g_force_lon": round(self.bit_stream_to_float32(G_FORCE_LON_POS), 2),
+				"max_rpm": int(self.bit_stream_to_float32(MAX_RPM_POS)),
+				"rpm": round(self.bit_stream_to_float32(RPM_POS), 2),
+				"position_x": round(self.bit_stream_to_float32(POSITION_X_POS), 3),
+				"position_y": round(self.bit_stream_to_float32(POSITION_Y_POS), 3),
+				"position_z": round(self.bit_stream_to_float32(POSITION_Z_POS), 3),
+			}
+		except:
+			Debug.p("====read_data except")
+			self.try_to_connect_socket()
+
+		return infos
+
+
+class Telemetry:
+	max_g_force_lat = 0
+	max_g_force_lon = 0
+	min_g_force_lat = 0
+	min_g_force_lon = 0
+	last_max_rpm = None
+	rpm_shift_light = None
+	rpm_shift_light_step = None
+
+	last_y_1 = 0
+	last_y_2 = 0
+
+	last_shift_light_states = []
+	clear_state = False
+
+	infos = {}
+
+	def __init__(self):
+		for _gpio_led in RpmLeds.GPIO_HIGH_LED:
+			self.last_shift_light_states.append(None)
+
+	def recalculate_values(self):
+		self.max_g_force_lat = 0
+		self.max_g_force_lon = 0
+		self.min_g_force_lat = 0
+		self.min_g_force_lon = 0
+		self.rpm_shift_light = int(self.infos['max_rpm'] - (self.infos['max_rpm'] * (self.infos['high_rpm_percentage'] / 100)))
+		self.rpm_shift_light_step = int(self.infos['max_rpm'] * (self.infos['high_rpm_percentage_steps'] / 100))
+
+	def shift_light(self):
+		# if not racing
+		if self.infos['rpm'] <= 0:
+			# if already cleared
+			if self.clear_state:
+				return
+			# if not cleared yet, clear
+			else:
+				RpmLeds.clear_output()
+				# mark as cleared
+				self.clear_state = True
+				return
+
+		# if starts running and has a cleared state, unclear
+		elif self.clear_state:
+			self.clear_state = False
+
+		step_count = 0
+		for gpio_led in RpmLeds.GPIO_HIGH_LED:
+			this_rpm_shift_light_step = self.rpm_shift_light - (self.rpm_shift_light_step * (step_count - 1))
+			this_shift_light_state = True if self.infos['rpm'] >= this_rpm_shift_light_step else False
+
+			if this_shift_light_state != self.last_shift_light_states[step_count]:
+				GpioCalls.output(gpio_led, GPIO.HIGH if this_shift_light_state else GPIO.LOW)
+				self.last_shift_light_states[step_count] = this_shift_light_state
+			step_count += 1
+
+	def vibration(self):
+		delta_y_1 = round(self.infos['position_y'] - self.last_y_1, 3)
+		delta_y_2 = round(self.last_y_1 - self.last_y_2, 3)
+		abs_delta = abs(delta_y_1 - delta_y_2)
+		if abs_delta >= 0.007:
+			vibrate = "7█"
+		elif abs_delta >= 0.006:
+			vibrate = "6▉"
+		elif abs_delta >= 0.005:
+			vibrate = "5▊"
+		elif abs_delta >= 0.004:
+			vibrate = "4▋"
+		elif abs_delta >= 0.003:
+			vibrate = "3▌"
+		elif abs_delta >= 0.002:
+			vibrate = "2▍"
+		elif abs_delta >= 0.001:
+			vibrate = "1▎"
+		else:
+			vibrate = "0 "
+
+		# print("position: ", infos['position_x'], infos['position_y'], infos['position_z'], "      ")
+		# print("vibration: ", vibrate, "{:.3f}".format(last_y_1), "{:.3f}".format(last_y_2), "=", "{:.3f}".format(delta_y_1), "{:.3f}".format(delta_y_2), "{:.3f}".format(abs_delta), "   ")
+		# print("g_force_lat: ", infos['g_force_lat'], "|", min_g_force_lat, "|", max_g_force_lat, "   ")
+		# print("g_force_lon: ", infos['g_force_lon'], "|", min_g_force_lon, "|", max_g_force_lon, "   ")
+
+		Debug.p(vibrate)
+
+		self.last_y_2 = self.last_y_1
+		self.last_y_1 = self.infos['position_y']
+
+
+def main():
+	last_max_rpm = None
+
+	GpioCalls.setup()
+	RpmLeds.setup()
+
+	RpmLeds.clear_output()
+
+	data_com = DataComunication()
+	data_com.try_to_connect_socket()
+
+	GpioCalls.hello()
+
+	telemetry = Telemetry()
+	
+	while True:
+		telemetry.infos = data_com.read_data()
+
+		if last_max_rpm != telemetry.infos['max_rpm']:
+			telemetry.recalculate_values()
+			last_max_rpm = telemetry.infos['max_rpm']
+
+		# if infos['g_force_lat'] > max_g_force_lat:
+		# 	max_g_force_lat = infos['g_force_lat']
+
+		# if infos['g_force_lon'] > max_g_force_lon:
+		# 	max_g_force_lon = infos['g_force_lon']
+
+		# if infos['g_force_lat'] < min_g_force_lat:
+		# 	min_g_force_lat = infos['g_force_lat']
+
+		# if infos['g_force_lon'] < min_g_force_lon:
+		# 	min_g_force_lon = infos['g_force_lon']
+
+		telemetry.shift_light()
+		telemetry.vibration()
+
+
+def exit_gracefully(*args):
+	DataComunication.sock.close()
+	GPIO.cleanup()
+	exit(0)
+
+
+if __name__ == '__main__':
+	for sig in (signal.SIGABRT, signal.SIGILL, signal.SIGINT, signal.SIGSEGV, signal.SIGTERM):
+		signal.signal(sig, exit_gracefully)
+	main()
+	DataComunication.sock.close()
+	GPIO.cleanup()

@@ -10,10 +10,11 @@
 ## CONFIGURATIONS
 
 HIGH_RPM_PERCENTAGE = 7
-HIGH_RPM_PERCENTAGE_STEPS = 2
+HIGH_RPM_PERCENTAGE_STEPS = 3
 
-SIMULATED_DATA = True # For debugging without real data (fake random data will be generated (with some order))
+SIMULATED_DATA = False # For debugging without real data (fake random data will be generated (with some order))
 FAKE_DATA_INTERVAL = 0.1
+MORE_RANDOM = False # Totally random data. Useful to test harsh transitions and limits in display
 
 # VISUAL OFFSETS
 RPM_V_OFFSET = 0
@@ -35,6 +36,8 @@ import random
 import sys
 import psutil
 import signal
+from time import strftime
+from time import gmtime
 # import evdev
 
 DIRT_IP = ""
@@ -42,397 +45,363 @@ DIRT_PORT = 20777
 RESEND_PORT = 20778
 
 # arguments
-resend_infos = False
+RESEND_INFOS = False
 for arg in sys.argv:
-	if arg == "-s": # act as server, resend infos in RESEND_PORT port
-		resend_infos = True
-
-RUN_TIME = 0
-LAP_TIME = 1
-POSITION_X = 4
-POSITION_Y = 5
-POSITION_Z = 6
-SPEED_POS = 7
-PITCH_X = 14
-PITCH_Y = 15
-PITCH_Z = 16
-GEAR_POS = 33
-G_FORCE_LAT = 34
-G_FORCE_LON = 35
-RPM_POS = 37
-TIRE_PRESSURE_FL = 57
-COMPLETED_LAPS = 59
-TOTAL_LAPS = 60
-MAX_RPM_POS = 63
-IDLE_RPM_POS = 64
-MAX_GEARS_POS = 65
-
-FULLBLOCK = u'\u2588' # █
-SHADEBLOCK = u'\u2592' # ▒
-
-# devices = [evdev.InputDevice(path) for path in evdev.list_devices()]
-# for device in devices:
-# 	print(device.path, device.name, device.phys)
-# print("====")
-
-# device = evdev.InputDevice('/dev/input/event22')
-
-# find self IP
-s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-s.connect(("8.8.8.8", 80))
-SELF_LAN_IP = s.getsockname()[0]
-s.close()
-
-sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-# nics = psutil.net_if_addrs()
-# for nic in nics:
-# 	for snicaddr in nics[nic]:
-# 		if snicaddr.family == socket.AF_INET and snicaddr.netmask == '255.255.255.0':
-# 			SELF_LAN_IP = snicaddr.address
-# 			break
-
-sock.bind((DIRT_IP, DIRT_PORT))
-
-if resend_infos:
-	ss = socket.socket()
-	try:
-		ss.bind((SELF_LAN_IP, RESEND_PORT))
-	except:
-		RESEND_PORT += 1
-		ss.bind((SELF_LAN_IP, RESEND_PORT))
-	print("Configured connection to receive from:", SELF_LAN_IP, ":", RESEND_PORT)
-	ss.listen(2)
-	try:
-		cc, addr = ss.accept()
-	except socket.timeout:
-		pass
-	print("Socket Up and running with a connection from ", addr)
-	time.sleep(1)
-
-time.sleep(INITIAL_SLEEP)
-
-window = curses.initscr()
-window.nodelay(True)
-curses.curs_set(0)
-window.keypad(1)
-curses.mousemask(1)
-window.clear()
-window.refresh()
-window_rows, window_cols = window.getmaxyx()
-window_middle = int(window_cols / 2)
-
-gear_window = None
-rpm_window = None
-shiftlight_window = [None, None]
-buttons_window = None
-
-rpm_info_size = 0
-rpm_idle_size = 0
-rpm_max_size = 0
-rpm_shift_light = 0
-rpm_shift_light_size = 0
-shift_light_h_size = 0
-shift_light_v_size = 0
-shift_light_h_begin = 0
-gear_h_size = 0
-gear_v_size = 0
-
-curses.start_color()
-RPM_LOW_COLOR = 1
-curses.init_pair(RPM_LOW_COLOR, curses.COLOR_BLUE, curses.COLOR_BLACK)
-RPM_COLOR = 2
-curses.init_pair(RPM_COLOR, curses.COLOR_GREEN, curses.COLOR_BLACK)
-RPM_HIGH_COLOR = 3
-curses.init_pair(RPM_HIGH_COLOR, curses.COLOR_RED, curses.COLOR_BLACK)
-RPM_SUPER_HIGH_COLOR = 4
-curses.init_pair(RPM_SUPER_HIGH_COLOR, curses.COLOR_YELLOW, curses.COLOR_BLACK)
-BACKGROUND_COLOR = 5
-curses.init_pair(BACKGROUND_COLOR, curses.COLOR_BLACK, curses.COLOR_BLACK)
-RPM_INFO_COLOR = 6
-curses.init_pair(RPM_INFO_COLOR, curses.COLOR_WHITE, curses.COLOR_BLUE)
-GEAR_COLOR = 7
-curses.init_pair(GEAR_COLOR, curses.COLOR_WHITE, curses.COLOR_BLACK)
-BUTTON_COLOR = 8
-curses.init_pair(BUTTON_COLOR, curses.COLOR_WHITE, curses.COLOR_BLACK)
-
-LEFT = 0
-RIGHT = 1
+	if arg == "-s": # server: resend infos in RESEND_PORT port
+		RESEND_INFOS = True
+	elif arg == "-d": # debug: simulate data, no real telemetry
+		SIMULATED_DATA = True
 
 
-def read_data_position(data, pos, byte_size):
-	return data[pos:pos+byte_size]
+class LanConnection:
+	self_lan_ip = None
+	# find self IP
+	def self_ip():
+		if self_lan_ip:
+			return self_lan_ip
+		
+		s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		s.connect(("8.8.8.8", 80))
+		self_lan_ip = s.getsockname()[0]
+		s.close()
+		return self_lan_ip
 
 
-def bit_stream_to_float32(data, pos):
+class TelemetryData:
+	RUN_TIME = 0
+	LAP_TIME = 1
+	POSITION_X = 4
+	POSITION_Y = 5
+	POSITION_Z = 6
+	SPEED_POS = 7
+	PITCH_X = 14
+	PITCH_Y = 15
+	PITCH_Z = 16
+	GEAR_POS = 33
+	G_FORCE_LAT = 34
+	G_FORCE_LON = 35
+	RPM_POS = 37
+	TIRE_PRESSURE_FL = 57
+	COMPLETED_LAPS = 59
+	TOTAL_LAPS = 60
+	MAX_RPM_POS = 63
+	IDLE_RPM_POS = 64
+	MAX_GEARS_POS = 65
+
 	byte_size = 4
-	pos *= byte_size
-	try:
-		value = struct.unpack('f', read_data_position(data, pos, byte_size))[0]
-	except struct.error as _:
-		value = 0
-		# print('Failed to get data item at pos {}'.format(pos))
-	except Exception as e:
-		value = 0
-		# print('Failed to get data item at pos {}. Make sure to set extradata=3 in the hardware settings.'.format(pos))
-	return value
+
+	sock = None
+
+	def setup():
+		TelemetryData.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+		TelemetryData.sock.bind((DIRT_IP, DIRT_PORT))
+		
+	def read_data_position(data, pos):
+		return data[pos:pos+TelemetryData.byte_size]
+
+	def bit_stream_to_float32(data, pos):
+		pos *= TelemetryData.byte_size
+		try:
+			value = struct.unpack('f', TelemetryData.read_data_position(data, pos))[0]
+		except struct.error as _:
+			value = 0
+			# print('Failed to get data item at pos {}'.format(pos))
+		except Exception as e:
+			value = 0
+			# print('Failed to get data item at pos {}. Make sure to set extradata=3 in the hardware settings.'.format(pos))
+		return value
 
 
-def draw_interface():
-	try:
-		draw_rpm_bar()
-		draw_gear_bar()
-		draw_shift_light_bar(LEFT)
-		draw_shift_light_bar(RIGHT)
-		# draw_buttons()
-	except curses.error:
-		return
+class Retransmit:
+	ss = None
+	cc = None
+
+	def setup():
+		if RESEND_INFOS:
+			Retransmit.ss = socket.socket()
+			try:
+				Retransmit.ss.bind((LanConnection.self_ip(), RESEND_PORT))
+			except:
+				RESEND_PORT += 1
+				Retransmit.ss.bind((SELF_LAN_IP, RESEND_PORT))
+			print("Configured connection to receive from:", SELF_LAN_IP, ":", RESEND_PORT)
+			Retransmit.ss.listen(2)
+			try:
+				Retransmit.cc, addr = Retransmit.ss.accept()
+			except socket.timeout:
+				pass
+			print("Socket Up and running with a connection from ", addr)
+			time.sleep(1)
 
 
-def draw_buttons():
-	global buttons_window
-	global buttons_v_size
-	global buttons_h_size
-	global buttons_h_begin
+class WindowDraw:
+	LEFT = 0
+	RIGHT = 1
+	RPM_LOW_COLOR = 1
+	RPM_COLOR = 2
+	RPM_HIGH_COLOR = 3
+	RPM_SUPER_HIGH_COLOR = 4
+	BACKGROUND_COLOR = 5
+	RPM_INFO_COLOR = 6
+	GEAR_COLOR = 7
+	BUTTON_COLOR = 8
 
-	button_h_size = 3
-	button_v_size = 1
-	button_v_spaces = 1
+	window = None
+	gear_window = None
+	rpm_window = None
+	shiftlight_window = [None, None]
+	buttons_window = None
 
-	buttons_v_size = (button_v_size * 2) + button_v_spaces + 2
-	buttons_h_size = button_h_size + 2
-	buttons_h_begin = window_cols - buttons_h_size - 1
+	window_rows = 0
+	window_cols = 0
+	window_middle = 0
+	rpm_info_size = 0
+	rpm_idle_size = 0
+	rpm_max_size = 0
+	rpm_shift_light = 0
+	rpm_shift_light_size = 0
+	shift_light_h_size = 0
+	shift_light_v_size = 0
+	shift_light_h_begin = 0
+	gear_h_size = 0
+	gear_v_size = 0
 
-	buttons_window = window.subwin(buttons_v_size, buttons_h_size, BUTTONS_V_OFFSET, buttons_h_begin)
-	buttons_window.box()
-	buttons_window.addstr(1, 1, " ⬆️ ", curses.color_pair(BUTTON_COLOR) | curses.A_BOLD)
-	buttons_window.addstr(1 + button_v_size + button_v_spaces, 1, " ⬇️ ", curses.color_pair(BUTTON_COLOR) | curses.A_BOLD)
-	
-	buttons_window.refresh()
+	def setup():
+		WindowDraw.window = curses.initscr()
+		WindowDraw.window.nodelay(True)
+		curses.curs_set(0)
+		WindowDraw.window.keypad(1)
+		curses.mousemask(1)
+		WindowDraw.window.clear()
+		WindowDraw.window.refresh()
+		WindowDraw.window_rows, WindowDraw.window_cols = WindowDraw.window.getmaxyx()
+		WindowDraw.window_middle = int(WindowDraw.window_cols / 2)
 
+		curses.start_color()
+		curses.init_pair(WindowDraw.RPM_LOW_COLOR, curses.COLOR_BLUE, curses.COLOR_BLACK)
+		curses.init_pair(WindowDraw.RPM_COLOR, curses.COLOR_GREEN, curses.COLOR_BLACK)
+		curses.init_pair(WindowDraw.RPM_HIGH_COLOR, curses.COLOR_RED, curses.COLOR_BLACK)
+		curses.init_pair(WindowDraw.RPM_SUPER_HIGH_COLOR, curses.COLOR_YELLOW, curses.COLOR_BLACK)
+		curses.init_pair(WindowDraw.BACKGROUND_COLOR, curses.COLOR_BLACK, curses.COLOR_BLACK)
+		curses.init_pair(WindowDraw.RPM_INFO_COLOR, curses.COLOR_WHITE, curses.COLOR_BLUE)
+		curses.init_pair(WindowDraw.GEAR_COLOR, curses.COLOR_WHITE, curses.COLOR_BLACK)
+		curses.init_pair(WindowDraw.BUTTON_COLOR, curses.COLOR_WHITE, curses.COLOR_BLACK)
 
-def button_interaction(mx, my):
-	return ""
+	def draw_interface():
+		try:
+			WindowDraw.draw_rpm_bar()
+			WindowDraw.draw_gear_bar()
+			WindowDraw.draw_shift_light_bar(LEFT)
+			WindowDraw.draw_shift_light_bar(RIGHT)
+			# draw_buttons()
+		except curses.error:
+			return
 
+	def draw_buttons():
+		button_h_size = 3
+		button_v_size = 1
+		button_v_spaces = 1
 
-def draw_gear_bar():
-	global gear_h_size
-	global gear_v_size
-	global gear_window
+		buttons_v_size = (button_v_size * 2) + button_v_spaces + 2
+		buttons_h_size = button_h_size + 2
+		buttons_h_begin = WindowDraw.window_cols - buttons_h_size - 1
 
-	gear_v_size = 7
-	gear_h_size = 9
+		WindowDraw.buttons_window = WindowDraw.window.subwin(buttons_v_size, buttons_h_size, BUTTONS_V_OFFSET, buttons_h_begin)
+		WindowDraw.buttons_window.box()
+		WindowDraw.buttons_window.addstr(1, 1, " ⬆️ ", curses.color_pair(BUTTON_COLOR) | curses.A_BOLD)
+		WindowDraw.buttons_window.addstr(1 + button_v_size + button_v_spaces, 1, " ⬇️ ", curses.color_pair(BUTTON_COLOR) | curses.A_BOLD)
+		
+		WindowDraw.buttons_window.refresh()
 
-	gear_v_offset = window_rows - GEAR_V_OFFSET - gear_v_size
+	def button_interaction(mx, my):
+		return ""
 
-	gear_h_begin = int(window_middle - (gear_h_size / 2))
+	def draw_gear_bar():
+		WindowDraw.gear_v_size = 7
+		WindowDraw.gear_h_size = 9
 
-	gear_window = window.subwin(gear_v_size, gear_h_size, gear_v_offset, gear_h_begin)
-	gear_window.box()
-	gear_window.refresh()
+		gear_v_offset = WindowDraw.window_rows - GEAR_V_OFFSET - WindowDraw.gear_v_size
 
+		gear_h_begin = int(WindowDraw.window_middle - (WindowDraw.gear_h_size / 2))
 
-def print_gear(gear):
-	global gear_window
+		WindowDraw.gear_window = window.subwin(WindowDraw.gear_v_size, WindowDraw.gear_h_size, gear_v_offset, gear_h_begin)
+		WindowDraw.gear_window.box()
+		WindowDraw.gear_window.refresh()
 
-	h_offset = 2
+	def print_gear(gear):
+		h_offset = 2
 
-	try:
-		if gear == -1:
-			gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(3, h_offset, "┣━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(4, h_offset, "┃  ╲  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(5, h_offset, "      ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		elif gear == 0:
-			gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(3, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(4, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(5, h_offset, "┗━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		elif gear == 1:
-			gear_window.addstr(1, h_offset, " ━┓   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(2, h_offset, "  ┃   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(3, h_offset, "  ┃   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(4, h_offset, "  ┃   ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(5, h_offset, " ━┻━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		elif gear == 2:
-			gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(3, h_offset, "┏━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(4, h_offset, "┃     ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(5, h_offset, "┗━━━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		elif gear == 3:
-			gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(3, h_offset, " ━━━┫ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(5, h_offset, " ━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		elif gear == 4:
-			gear_window.addstr(1, h_offset, "╻   ╻ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(3, h_offset, "┗━━━┫ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(5, h_offset, "    ╹ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		elif gear == 5:
-			gear_window.addstr(1, h_offset, "┏━━━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(2, h_offset, "┃     ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(3, h_offset, "┗━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(5, h_offset, " ━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		elif gear == 6 :
-			gear_window.addstr(1, h_offset, "┏━━━  ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(2, h_offset, "┃     ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(3, h_offset, "┣━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(4, h_offset, "┃   ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(5, h_offset, "┗━━━┛ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-		elif gear == 7:
-			gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(3, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-			gear_window.addstr(5, h_offset, "    ╹ ", curses.color_pair(GEAR_COLOR) | curses.A_BOLD)
-	except curses.error:
-		return
-
-def draw_shift_light_bar(side):
-	global window_cols
-	global window_rows
-	global window_middle
-	global shift_light_h_size
-	global shift_light_v_size
-	global gear_h_size
-	global shift_light_h_begin
-	global shiftlight_window
-
-	shift_light_h_size = 5
-	shift_light_v_size = 6
-
-	if side == LEFT:
-		shift_light_h_begin = int(window_middle - (gear_h_size / 2) - shift_light_h_size)
-	else: # RIGHT
-		shift_light_h_begin = int(window_middle + (gear_h_size / 2))
-
-	shift_light_v_offset = window_rows - SHIFT_LIGHT_V_OFFSET - shift_light_v_size
-
-	shiftlight_window[side] = window.subwin(shift_light_v_size, shift_light_h_size, shift_light_v_offset, shift_light_h_begin)
-	shiftlight_window[side].refresh()
-
-
-def print_shift_light(rpm):
-	global window_middle
-	global rpm_shift_light
-	global shift_light_h_size
-	global shift_light_v_size
-	global shift_light_h_begin
-	global shiftlight_window
-
-	if rpm >= rpm_shift_light:
-		color = RPM_HIGH_COLOR
-		shiftlight_window[LEFT].bkgdset(curses.COLOR_RED)
-		shiftlight_window[RIGHT].bkgdset(curses.COLOR_RED)
-	else:
-		color = BACKGROUND_COLOR
-		shiftlight_window[LEFT].bkgdset(curses.COLOR_BLACK)
-		shiftlight_window[RIGHT].bkgdset(curses.COLOR_BLACK)
-
-	try:
-		for i in range(shift_light_v_size-1):
-			shiftlight_window[LEFT].addstr(i, 0, FULLBLOCK * shift_light_h_size, curses.color_pair(color))
-			shiftlight_window[RIGHT].addstr(i, 0, FULLBLOCK * shift_light_h_size, curses.color_pair(color))
-	except curses.error:
-		return
-
-
-def draw_rpm_bar():
-	global window_cols
-	global window_rows
-	global rpm_info_size
-	global rpm_window
-
-	rpm_h_begin = 1
-
-	rpm_v_size = 3
-	rpm_h_size = window_cols - 4
-
-	rpm_v_offset = window_rows - rpm_v_size - RPM_V_OFFSET
-
-	rpm_window = window.subwin(rpm_v_size, rpm_h_size, rpm_v_offset, rpm_h_begin)
-	rpm_window.box()
-
-	# rpm_window.addstr(1, 1, "   ", curses.color_pair(RPM_INFO_COLOR) | curses.A_BOLD)
-
-	rpm_window.refresh()
-
-	rpm_info_size = window_cols - 6
-
-
-def print_rpm(rpm, max_rpm, idle_rpm):
-	global rpm_info_size
-	global rpm_idle_size
-	global rpm_max_size
-	global rpm_shift_light_size
-	global rpm_window
-
-	if max_rpm == 0:
-		max_rpm = 5000
-
-	rpm_size = int((rpm / max_rpm) * rpm_info_size)
-	fill_background = True
-
-	rpm_info_v_begin = 1
-	rpm_info_h_begin = 2
-
-	try:
-		if rpm <= idle_rpm:
-			rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, FULLBLOCK * rpm_size, curses.color_pair(RPM_LOW_COLOR))
-		else:
-			rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, FULLBLOCK * rpm_idle_size, curses.color_pair(RPM_LOW_COLOR))
-			if rpm_size <= rpm_shift_light_size:
-				rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_idle_size, FULLBLOCK * (rpm_size - rpm_idle_size), curses.color_pair(RPM_COLOR))
+		try:
+			if gear == -1:
+				WindowDraw.gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "┣━━━┛ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "┃  ╲  ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, "      ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 0:
+				WindowDraw.gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "┃   ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "┃   ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, "┗━━━┛ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 1:
+				WindowDraw.gear_window.addstr(1, h_offset, " ━┓   ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "  ┃   ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "  ┃   ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "  ┃   ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, " ━┻━  ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 2:
+				WindowDraw.gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "┏━━━┛ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "┃     ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, "┗━━━  ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 3:
+				WindowDraw.gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, " ━━━┫ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, " ━━━┛ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 4:
+				WindowDraw.gear_window.addstr(1, h_offset, "╻   ╻ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "┗━━━┫ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, "    ╹ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 5:
+				WindowDraw.gear_window.addstr(1, h_offset, "┏━━━  ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "┃     ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "┗━━━┓ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, " ━━━┛ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 6 :
+				WindowDraw.gear_window.addstr(1, h_offset, "┏━━━  ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "┃     ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "┣━━━┓ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "┃   ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, "┗━━━┛ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 7:
+				WindowDraw.gear_window.addstr(1, h_offset, " ━━━┓ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "    ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "    ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, "    ╹ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 8:
+				WindowDraw.gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "┣━━━┫ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "┃   ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, "┗━━━┛ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+			elif gear == 9:
+				WindowDraw.gear_window.addstr(1, h_offset, "┏━━━┓ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "┃   ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "┗━━━┫ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "    ┃ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, "    ╹ ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
 			else:
-				rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_idle_size, FULLBLOCK * (rpm_shift_light_size - rpm_idle_size), curses.color_pair(RPM_COLOR))
-				if rpm_size <= rpm_max_size:
-					rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_shift_light_size, FULLBLOCK * (rpm_size - rpm_shift_light_size), curses.color_pair(RPM_HIGH_COLOR))
-				else: # super high RPM
-					fill_background = False
-					rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_shift_light_size, FULLBLOCK * (rpm_max_size - rpm_shift_light_size + 1), curses.color_pair(RPM_HIGH_COLOR))
-					rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_max_size, FULLBLOCK * 1, curses.color_pair(RPM_SUPER_HIGH_COLOR))
+				WindowDraw.gear_window.addstr(1, h_offset, "      ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(2, h_offset, "      ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(3, h_offset, "      ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(4, h_offset, "      ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+				WindowDraw.gear_window.addstr(5, h_offset, "      ", curses.color_pair(WindowDraw.GEAR_COLOR) | curses.A_BOLD)
+		except curses.error:
+			return
 
-		if fill_background:
-			rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_size, FULLBLOCK * (rpm_max_size - rpm_size + 1), curses.color_pair(BACKGROUND_COLOR))
-	except curses.error:
-		return
+	def draw_shift_light_bar(side):
+		WindowDraw.shift_light_h_size = 5
+		WindowDraw.shift_light_v_size = 6
 
-	# iddle_rpm_h_offset = rpm_info_h_begin + rpm_idle_size - 7
-	# if iddle_rpm_h_offset < 0:
-	# 	iddle_rpm_h_offset = 1
-	
-	# rpm_window.addstr(rpm_info_v_begin, iddle_rpm_h_offset, str(rpm) + "  ", curses.color_pair(RPM_INFO_COLOR) | curses.A_BOLD)
+		if side == LEFT:
+			WindowDraw.shift_light_h_begin = int(WindowDraw.window_middle - (WindowDraw.gear_h_size / 2) - WindowDraw.shift_light_h_size)
+		else: # RIGHT
+			WindowDraw.shift_light_h_begin = int(WindowDraw.window_middle + (WindowDraw.gear_h_size / 2))
+
+		shift_light_v_offset = WindowDraw.window_rows - SHIFT_LIGHT_V_OFFSET - WindowDraw.shift_light_v_size
+
+		WindowDraw.shiftlight_window[side] = window.subwin(WindowDraw.shift_light_v_size, WindowDraw.shift_light_h_size, shift_light_v_offset, shift_light_h_begin)
+		WindowDraw.shiftlight_window[side].refresh()
 
 
-def recalculate_values(idle_rpm, max_rpm):
-	global window_rows
-	global window_cols
-	global rpm_info_size
-	global rpm_idle_size
-	global rpm_max_size
-	global rpm_shift_light_size
-	global rpm_shift_light
+	def print_shift_light(rpm):
+		if rpm >= WindowDraw.rpm_shift_light:
+			color = RPM_HIGH_COLOR
+			WindowDraw.shiftlight_window[LEFT].bkgdset(curses.COLOR_RED)
+			WindowDraw.shiftlight_window[RIGHT].bkgdset(curses.COLOR_RED)
+		else:
+			color = BACKGROUND_COLOR
+			WindowDraw.shiftlight_window[LEFT].bkgdset(curses.COLOR_BLACK)
+			WindowDraw.shiftlight_window[RIGHT].bkgdset(curses.COLOR_BLACK)
 
-	if max_rpm == 0:
-		max_rpm = 5000
-	
-	# if idle_rpm == 0:
-	# 	idle_rpm = 1000
+		try:
+			for i in range(WindowDraw.shift_light_v_size-1):
+				WindowDraw.shiftlight_window[LEFT].addstr(i, 0, '█' * WindowDraw.shift_light_h_size, curses.color_pair(color))
+				WindowDraw.shiftlight_window[RIGHT].addstr(i, 0, '█' * WindowDraw.shift_light_h_size, curses.color_pair(color))
+		except curses.error:
+			return
 
-	window_rows, window_cols = window.getmaxyx()
-	window_middle = int(window_cols / 2)
 
-	rpm_max_size = int(rpm_info_size)
-	rpm_idle_size = int((idle_rpm / max_rpm) * rpm_info_size)
-	rpm_shift_light = int(max_rpm - (max_rpm * (HIGH_RPM_PERCENTAGE / 100)))
-	rpm_shift_light_size = int(rpm_max_size - (rpm_max_size * (HIGH_RPM_PERCENTAGE / 100)))
+	def draw_rpm_bar():
+		rpm_h_begin = 1
+
+		rpm_v_size = 3
+		rpm_h_size = WindowDraw.window_cols - 4
+
+		rpm_v_offset = WindowDraw.window_rows - rpm_v_size - RPM_V_OFFSET
+
+		WindowDraw.rpm_window = WindowDraw.window.subwin(rpm_v_size, rpm_h_size, rpm_v_offset, rpm_h_begin)
+		WindowDraw.rpm_window.box()
+
+		# WindowDraw.rpm_window.addstr(1, 1, "   ", curses.color_pair(RPM_INFO_COLOR) | curses.A_BOLD)
+
+		WindowDraw.rpm_window.refresh()
+
+		WindowDraw.rpm_info_size = WindowDraw.window_cols - 6
+
+	def print_rpm(rpm, max_rpm, idle_rpm):
+		if max_rpm == 0:
+			max_rpm = 5000
+
+		rpm_size = int((rpm / max_rpm) * WindowDraw.rpm_info_size)
+		fill_background = True
+
+		rpm_info_v_begin = 1
+		rpm_info_h_begin = 2
+
+		try:
+			if rpm <= idle_rpm:
+				WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, '█' * rpm_size, curses.color_pair(RPM_LOW_COLOR))
+			else:
+				WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, '█' * WindowDraw.rpm_idle_size, curses.color_pair(RPM_LOW_COLOR))
+				if rpm_size <= WindowDraw.rpm_shift_light_size:
+					WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_idle_size, '█' * (rpm_size - WindowDraw.rpm_idle_size), curses.color_pair(RPM_COLOR))
+				else:
+					WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_idle_size, '█' * (WindowDraw.rpm_shift_light_size - WindowDraw.rpm_idle_size), curses.color_pair(RPM_COLOR))
+					if rpm_size <= WindowDraw.rpm_max_size:
+						WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_shift_light_size, '█' * (rpm_size - WindowDraw.rpm_shift_light_size), curses.color_pair(RPM_HIGH_COLOR))
+					else: # super high RPM
+						fill_background = False
+						WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_shift_light_size, '█' * (WindowDraw.rpm_max_size - WindowDraw.rpm_shift_light_size + 1), curses.color_pair(RPM_HIGH_COLOR))
+						WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_max_size, '█' * 1, curses.color_pair(RPM_SUPER_HIGH_COLOR))
+
+			if fill_background:
+				WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_size, '█' * (WindowDraw.rpm_max_size - rpm_size + 1), curses.color_pair(BACKGROUND_COLOR))
+		except curses.error:
+			return
+
+	def recalculate_values(idle_rpm, max_rpm):
+		if max_rpm == 0:
+			max_rpm = 5000
+		
+		# if idle_rpm == 0:
+		# 	idle_rpm = 1000
+
+		WindowDraw.window_rows, WindowDraw.window_cols = window.getmaxyx()
+		window_middle = int(WindowDraw.window_cols / 2)
+
+		WindowDraw.rpm_max_size = int(WindowDraw.rpm_info_size)
+		WindowDraw.rpm_idle_size = int((idle_rpm / max_rpm) * WindowDraw.rpm_info_size)
+		WindowDraw.rpm_shift_light = int(max_rpm - (max_rpm * (HIGH_RPM_PERCENTAGE / 100)))
+		WindowDraw.rpm_shift_light_size = int(WindowDraw.rpm_max_size - (WindowDraw.rpm_max_size * (HIGH_RPM_PERCENTAGE / 100)))
 
 
 start_time = time.time()
@@ -441,6 +410,7 @@ max_fake_speed = 300
 min_fake_speed = (max_fake_speed / 10) * -1
 speed_by_gear = max_fake_speed / max_fake_gears
 max_rpm_variation = 100
+completed_laps = 0
 last_data = {
 	"run_time": 0.0,
 	"lap_time": 0,
@@ -462,12 +432,17 @@ last_data = {
 def generate_fake_data():
 	global last_data
 	global start_time
+	global completed_laps
 
 	time.sleep(FAKE_DATA_INTERVAL)
 	delta_speed = random.choice([-2, -1, 0, 1, 2])
 	speed = last_data['speed'] + delta_speed
+
+	if random.randrange(1, 40, 1) == 1:
+		completed_laps = last_data['completed_laps'] + 1
+		start_time = time.time()
+
 	run_time = time.time() - start_time
-	completed_laps = last_data['completed_laps'] + (1 if random.randrange(1, 50, 1) == 1 else 0)
 
 	# speed adjust
 	if speed >= max_fake_speed * 2 / 3:
@@ -480,10 +455,13 @@ def generate_fake_data():
 		speed = min_fake_speed
 	
 	# gear adjust
-	if speed < 0:
-		gear = 0 if last_data['gear'] >= 1 else -1
+	if MORE_RANDOM:
+		gear = random.randrange(-1, 10)
 	else:
-		gear = 0 if last_data['gear'] < 0 else round(speed / speed_by_gear)
+		if speed < 0:
+			gear = 0 if last_data['gear'] >= 1 else -1
+		else:
+			gear = 0 if last_data['gear'] < 0 else round(speed / speed_by_gear)
 	
 	# rpm adjust
 	rpm = ((speed % speed_by_gear) / speed_by_gear) * (last_data['max_rpm'] - last_data['idle_rpm']) + last_data['idle_rpm']
@@ -539,11 +517,12 @@ def send_info_socket(infos):
 		infos['position_y'],
 		infos['position_z'],
 		infos['g_force_lat'],
-		infos['g_force_lon']
+		infos['g_force_lon'],
+		infos['gear']
 	]
 
 	try:
-		cc.send(struct.pack('<9f',*ret_data))
+		cc.send(struct.pack('<10f',*ret_data))
 	except Exception as e:
 		print(e)
 		cc, addr = ss.accept()
@@ -556,7 +535,7 @@ def read_data():
 		data, addr = sock.recvfrom(1024) # buffer size
 		infos = {
 			"run_time": round(bit_stream_to_float32(data, RUN_TIME), 1),
-			"lap_time": round(bit_stream_to_float32(data, LAP_TIME), 1),
+			"lap_time": round(bit_stream_to_float32(data, LAP_TIME), 2),
 			"speed": round(bit_stream_to_float32(data, SPEED_POS) * 3.6),
 			"gear": int(bit_stream_to_float32(data, GEAR_POS)),
 			"rpm": int(bit_stream_to_float32(data, RPM_POS)),
@@ -568,10 +547,13 @@ def read_data():
 			"position_y": round(bit_stream_to_float32(data, POSITION_Y), 3),
 			"position_z": round(bit_stream_to_float32(data, POSITION_Z), 3),
 			"g_force_lat": round(bit_stream_to_float32(data, G_FORCE_LAT), 3),
-			"g_force_lon": round(bit_stream_to_float32(data, G_FORCE_LON), 3)
+			"g_force_lon": round(bit_stream_to_float32(data, G_FORCE_LON), 3),
+			"max_speed": 0
 		}
+		if infos['rpm'] == 0:
+			infos['gear'] = -2
 
-	if resend_infos:
+	if RESEND_INFOS:
 		send_info_socket(infos)
 
 	return infos
@@ -580,10 +562,19 @@ def read_data():
 def main():
 	global window_rows
 	global window_cols
+
+	TelemetryData.setup()
+	Retransmit.setup()
+
+	time.sleep(INITIAL_SLEEP)
 	
 	draw_interface()
 	last_gear = None
 	last_max_rpm = None
+	last_max_speed = 0
+	best_lap_time = 0.00
+	last_lap_time = 0.00
+	last_completed_laps = 0
 
 	mx = 0
 	my = 0
@@ -618,6 +609,11 @@ def main():
 		if last_max_rpm != infos['max_rpm'] or rpm_max_size == 0:
 			recalculate_values(infos['idle_rpm'], infos['max_rpm'])
 			last_max_rpm = infos['max_rpm']
+			last_lap_time = 0
+			if infos['max_rpm'] != 0:
+				last_max_speed = 0
+				best_lap_time = 0.00
+				last_completed_laps = 0
 
 		print_shift_light(infos['rpm'])
 
@@ -631,6 +627,23 @@ def main():
 			gear_window.refresh()
 			last_gear = infos['gear']
 		
+		if last_max_speed < infos['speed']:
+			last_max_speed = infos['speed']
+		infos['max_speed'] = last_max_speed
+
+		# first lap
+		if infos['completed_laps'] == 0 and infos['lap_time'] > 0:
+			best_lap_time = infos['lap_time']
+		# one more lap
+		elif infos['lap_time'] < last_lap_time:
+			# check if it was smaller
+			if last_lap_time < best_lap_time:
+				best_lap_time = last_lap_time
+			last_completed_laps = infos['completed_laps']
+		last_lap_time = infos['lap_time']
+
+		infos['best_lap_time'] = best_lap_time
+
 		debug(infos)
 
 		window.addstr(0, 0, '')
@@ -638,20 +651,27 @@ def main():
 
 
 def debug(infos):
-	global gear_h_size
 	global window_rows
-	global rpm_v_size
-
-	lap_info = "  lap: " + str(infos['lap_time']) + "s | " + str(infos['completed_laps']) + " / " + str(infos['total_laps']) + "      "
 
 	debug_v_size = 4
 	debug_h_begin = 3
 	debug_v_begin = window_rows - RPM_V_OFFSET - 4 - debug_v_size
 
+	lap_time = str(infos['lap_time']).split('.')
+	best_lap_time = str(infos['best_lap_time']).split('.')
+
+	lap_sep = '  | ' if len(lap_time[1]) == 1 else ' | '
+
+	speed_info =     "speed: " + str(infos["speed"]) +     " Km/h   "
+	max_speed_info = "  max: " + str(infos["max_speed"]) + " Km/h   "
+	lap_info =       "  lap: " + strftime("%M:%S", gmtime(int(lap_time[0]))) + "." + lap_time[1] + lap_sep + str(infos['completed_laps']) + " / " + str(infos['total_laps']) + "      "
+	best_lap_info =  " best: " + strftime("%M:%S", gmtime(int(best_lap_time[0]))) + "." + best_lap_time[1] + "   "
+
 	try:
-		window.addstr(debug_v_begin + 1, debug_h_begin, "speed: " + str(infos["speed"]) + " Km/h   ", curses.color_pair(GEAR_COLOR))
-		window.addstr(debug_v_begin + 3, debug_h_begin, "total: " + str(infos["run_time"]) + "s   ", curses.color_pair(GEAR_COLOR))
-		window.addstr(debug_v_begin + 4, debug_h_begin, lap_info, curses.color_pair(GEAR_COLOR))
+		window.addstr(debug_v_begin + 1, debug_h_begin, speed_info, curses.color_pair(WindowDraw.GEAR_COLOR))
+		window.addstr(debug_v_begin + 2, debug_h_begin, max_speed_info, curses.color_pair(WindowDraw.GEAR_COLOR))
+		window.addstr(debug_v_begin + 3, debug_h_begin, lap_info, curses.color_pair(WindowDraw.GEAR_COLOR))
+		window.addstr(debug_v_begin + 4, debug_h_begin, best_lap_info, curses.color_pair(WindowDraw.GEAR_COLOR))
 	except curses.error:
 		return
 
