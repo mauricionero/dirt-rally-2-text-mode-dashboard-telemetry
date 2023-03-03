@@ -17,7 +17,8 @@ FAKE_DATA_INTERVAL = 0.1
 MORE_RANDOM = False # Totally random data. Useful to test harsh transitions and limits in display
 
 # VISUAL OFFSETS
-RPM_V_OFFSET = 0
+DISTANCE_OFFSET = 0
+RPM_V_OFFSET = DISTANCE_OFFSET + 1
 SHIFT_LIGHT_V_OFFSET = RPM_V_OFFSET + 3
 GEAR_V_OFFSET = RPM_V_OFFSET + 3
 DEBUG_V_OFFSET = 5
@@ -55,21 +56,24 @@ for arg in sys.argv:
 
 class LanConnection:
 	self_lan_ip = None
+	
 	# find self IP
 	def self_ip():
-		if self_lan_ip:
-			return self_lan_ip
+		if LanConnection.self_lan_ip:
+			return LanConnection.self_lan_ip
 		
 		s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 		s.connect(("8.8.8.8", 80))
-		self_lan_ip = s.getsockname()[0]
+		LanConnection.self_lan_ip = s.getsockname()[0]
 		s.close()
-		return self_lan_ip
+		return LanConnection.self_lan_ip
 
 
 class TelemetryData:
 	RUN_TIME = 0
 	LAP_TIME = 1
+	DISTANCE_DRIVEN_LAP = 2
+	DISTANCE_DRIVEN_OVERALL = 3
 	POSITION_X = 4
 	POSITION_Y = 5
 	POSITION_Z = 6
@@ -84,6 +88,7 @@ class TelemetryData:
 	TIRE_PRESSURE_FL = 57
 	COMPLETED_LAPS = 59
 	TOTAL_LAPS = 60
+	TRACK_LENGTH_TOTAL = 61
 	MAX_RPM_POS = 63
 	IDLE_RPM_POS = 64
 	MAX_GEARS_POS = 65
@@ -91,6 +96,8 @@ class TelemetryData:
 	byte_size = 4
 
 	sock = None
+
+	infos = []
 
 	def setup():
 		TelemetryData.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -111,27 +118,83 @@ class TelemetryData:
 			# print('Failed to get data item at pos {}. Make sure to set extradata=3 in the hardware settings.'.format(pos))
 		return value
 
+	def read_data():
+		if SIMULATED_DATA:
+			TelemetryData.infos = FakeData.generate_fake_data()
+		else:
+			data, addr = TelemetryData.sock.recvfrom(1024) # buffer size
+			TelemetryData.infos = {
+				"run_time": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.RUN_TIME), 1),
+				"lap_time": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.LAP_TIME), 2),
+				"speed": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.SPEED_POS) * 3.6),
+				"gear": int(TelemetryData.bit_stream_to_float32(data, TelemetryData.GEAR_POS)),
+				"rpm": int(TelemetryData.bit_stream_to_float32(data, TelemetryData.RPM_POS)),
+				"max_rpm": int(TelemetryData.bit_stream_to_float32(data, TelemetryData.MAX_RPM_POS)),
+				"idle_rpm": int(TelemetryData.bit_stream_to_float32(data, TelemetryData.IDLE_RPM_POS)),
+				"completed_laps": int(TelemetryData.bit_stream_to_float32(data, TelemetryData.COMPLETED_LAPS)),
+				"total_laps": int(TelemetryData.bit_stream_to_float32(data, TelemetryData.TOTAL_LAPS)),
+				"position_x": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.POSITION_X), 3),
+				"position_y": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.POSITION_Y), 3),
+				"position_z": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.POSITION_Z), 3),
+				"g_force_lat": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.G_FORCE_LAT), 3),
+				"g_force_lon": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.G_FORCE_LON), 3),
+				"distance_driven": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.DISTANCE_DRIVEN_LAP) / 1000, 1),
+				"track_length": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.TRACK_LENGTH_TOTAL) / 1000, 1),
+				"percent_distance": 0,
+				"max_speed": 0
+			}
+			if TelemetryData.infos['rpm'] == 0:
+				TelemetryData.infos['gear'] = -2
+			TelemetryData.infos['percent_distance'] = 0 if TelemetryData.infos['track_length'] == 0 else int(TelemetryData.infos['distance_driven'] / TelemetryData.infos['track_length'] * 100)
+
+		if RESEND_INFOS:
+			Retransmit.send_info_socket(TelemetryData.infos)
+
+		return TelemetryData.infos
+
 
 class Retransmit:
 	ss = None
 	cc = None
+	addr = None
+	resend_port = RESEND_PORT
 
 	def setup():
 		if RESEND_INFOS:
 			Retransmit.ss = socket.socket()
 			try:
-				Retransmit.ss.bind((LanConnection.self_ip(), RESEND_PORT))
+				Retransmit.ss.bind((LanConnection.self_ip(), Retransmit.resend_port))
 			except:
-				RESEND_PORT += 1
-				Retransmit.ss.bind((SELF_LAN_IP, RESEND_PORT))
-			print("Configured connection to receive from:", SELF_LAN_IP, ":", RESEND_PORT)
+				Retransmit.resend_port += 1
+				Retransmit.ss.bind((LanConnection.self_ip(), Retransmit.resend_port))
+			print("Configured connection to receive from:", LanConnection.self_ip(), ":", Retransmit.resend_port)
 			Retransmit.ss.listen(2)
 			try:
-				Retransmit.cc, addr = Retransmit.ss.accept()
+				Retransmit.cc, Retransmit.addr = Retransmit.ss.accept()
 			except socket.timeout:
 				pass
-			print("Socket Up and running with a connection from ", addr)
+			print("Socket Up and running with a connection from ", Retransmit.addr)
 			time.sleep(1)
+
+	def send_info_socket(infos):
+		ret_data = [
+			HIGH_RPM_PERCENTAGE,
+			HIGH_RPM_PERCENTAGE_STEPS,
+			infos['rpm'],
+			infos['max_rpm'],
+			infos['position_x'],
+			infos['position_y'],
+			infos['position_z'],
+			infos['g_force_lat'],
+			infos['g_force_lon'],
+			infos['gear']
+		]
+
+		try:
+			Retransmit.cc.send(struct.pack('<10f',*ret_data))
+		except Exception as e:
+			print(e)
+			Retransmit.cc, Retransmit.addr = Retransmit.ss.accept()
 
 
 class WindowDraw:
@@ -145,12 +208,14 @@ class WindowDraw:
 	RPM_INFO_COLOR = 6
 	GEAR_COLOR = 7
 	BUTTON_COLOR = 8
+	DISTANCE_COLOR = 9
 
 	window = None
 	gear_window = None
 	rpm_window = None
 	shiftlight_window = [None, None]
 	buttons_window = None
+	distance_window = None
 
 	window_rows = 0
 	window_cols = 0
@@ -165,6 +230,7 @@ class WindowDraw:
 	shift_light_h_begin = 0
 	gear_h_size = 0
 	gear_v_size = 0
+	distance_h_size = 0
 
 	def setup():
 		WindowDraw.window = curses.initscr()
@@ -186,13 +252,30 @@ class WindowDraw:
 		curses.init_pair(WindowDraw.RPM_INFO_COLOR, curses.COLOR_WHITE, curses.COLOR_BLUE)
 		curses.init_pair(WindowDraw.GEAR_COLOR, curses.COLOR_WHITE, curses.COLOR_BLACK)
 		curses.init_pair(WindowDraw.BUTTON_COLOR, curses.COLOR_WHITE, curses.COLOR_BLACK)
+		curses.init_pair(WindowDraw.DISTANCE_COLOR, curses.COLOR_CYAN, curses.COLOR_WHITE)
+
+	def recalculate_values(idle_rpm, max_rpm):
+		if max_rpm == 0:
+			max_rpm = 5000
+		
+		# if idle_rpm == 0:
+		# 	idle_rpm = 1000
+
+		WindowDraw.window_rows, WindowDraw.window_cols = WindowDraw.window.getmaxyx()
+		window_middle = int(WindowDraw.window_cols / 2)
+
+		WindowDraw.rpm_max_size = int(WindowDraw.rpm_info_size)
+		WindowDraw.rpm_idle_size = int((idle_rpm / max_rpm) * WindowDraw.rpm_info_size)
+		WindowDraw.rpm_shift_light = int(max_rpm - (max_rpm * (HIGH_RPM_PERCENTAGE / 100)))
+		WindowDraw.rpm_shift_light_size = int(WindowDraw.rpm_max_size - (WindowDraw.rpm_max_size * (HIGH_RPM_PERCENTAGE / 100)))
 
 	def draw_interface():
 		try:
+			# WindowDraw.draw_distance_bar()
 			WindowDraw.draw_rpm_bar()
 			WindowDraw.draw_gear_bar()
-			WindowDraw.draw_shift_light_bar(LEFT)
-			WindowDraw.draw_shift_light_bar(RIGHT)
+			WindowDraw.draw_shift_light_bar(WindowDraw.LEFT)
+			WindowDraw.draw_shift_light_bar(WindowDraw.RIGHT)
 			# draw_buttons()
 		except curses.error:
 			return
@@ -224,7 +307,7 @@ class WindowDraw:
 
 		gear_h_begin = int(WindowDraw.window_middle - (WindowDraw.gear_h_size / 2))
 
-		WindowDraw.gear_window = window.subwin(WindowDraw.gear_v_size, WindowDraw.gear_h_size, gear_v_offset, gear_h_begin)
+		WindowDraw.gear_window = WindowDraw.window.subwin(WindowDraw.gear_v_size, WindowDraw.gear_h_size, gear_v_offset, gear_h_begin)
 		WindowDraw.gear_window.box()
 		WindowDraw.gear_window.refresh()
 
@@ -311,34 +394,57 @@ class WindowDraw:
 		WindowDraw.shift_light_h_size = 5
 		WindowDraw.shift_light_v_size = 6
 
-		if side == LEFT:
+		if side == WindowDraw.LEFT:
 			WindowDraw.shift_light_h_begin = int(WindowDraw.window_middle - (WindowDraw.gear_h_size / 2) - WindowDraw.shift_light_h_size)
 		else: # RIGHT
 			WindowDraw.shift_light_h_begin = int(WindowDraw.window_middle + (WindowDraw.gear_h_size / 2))
 
 		shift_light_v_offset = WindowDraw.window_rows - SHIFT_LIGHT_V_OFFSET - WindowDraw.shift_light_v_size
 
-		WindowDraw.shiftlight_window[side] = window.subwin(WindowDraw.shift_light_v_size, WindowDraw.shift_light_h_size, shift_light_v_offset, shift_light_h_begin)
+		WindowDraw.shiftlight_window[side] = WindowDraw.window.subwin(WindowDraw.shift_light_v_size, WindowDraw.shift_light_h_size, shift_light_v_offset, WindowDraw.shift_light_h_begin)
 		WindowDraw.shiftlight_window[side].refresh()
-
 
 	def print_shift_light(rpm):
 		if rpm >= WindowDraw.rpm_shift_light:
-			color = RPM_HIGH_COLOR
-			WindowDraw.shiftlight_window[LEFT].bkgdset(curses.COLOR_RED)
-			WindowDraw.shiftlight_window[RIGHT].bkgdset(curses.COLOR_RED)
+			color = WindowDraw.RPM_HIGH_COLOR
+			WindowDraw.shiftlight_window[WindowDraw.LEFT].bkgdset(curses.COLOR_RED)
+			WindowDraw.shiftlight_window[WindowDraw.RIGHT].bkgdset(curses.COLOR_RED)
 		else:
-			color = BACKGROUND_COLOR
-			WindowDraw.shiftlight_window[LEFT].bkgdset(curses.COLOR_BLACK)
-			WindowDraw.shiftlight_window[RIGHT].bkgdset(curses.COLOR_BLACK)
+			color = WindowDraw.BACKGROUND_COLOR
+			WindowDraw.shiftlight_window[WindowDraw.LEFT].bkgdset(curses.COLOR_BLACK)
+			WindowDraw.shiftlight_window[WindowDraw.RIGHT].bkgdset(curses.COLOR_BLACK)
 
 		try:
 			for i in range(WindowDraw.shift_light_v_size-1):
-				WindowDraw.shiftlight_window[LEFT].addstr(i, 0, '█' * WindowDraw.shift_light_h_size, curses.color_pair(color))
-				WindowDraw.shiftlight_window[RIGHT].addstr(i, 0, '█' * WindowDraw.shift_light_h_size, curses.color_pair(color))
+				WindowDraw.shiftlight_window[WindowDraw.LEFT].addstr(i, 0, '█' * WindowDraw.shift_light_h_size, curses.color_pair(color))
+				WindowDraw.shiftlight_window[WindowDraw.RIGHT].addstr(i, 0, '█' * WindowDraw.shift_light_h_size, curses.color_pair(color))
 		except curses.error:
 			return
 
+	# def draw_distance_bar():
+	# 	distance_h_begin = 1
+	# 	distance_v_size = 1
+		
+	# 	distance_v_offset = WindowDraw.window_rows - distance_v_size - DISTANCE_OFFSET
+
+	# 	WindowDraw.distance_h_size = WindowDraw.window_cols - 2
+
+	# 	WindowDraw.distance_window = WindowDraw.window.subwin(distance_v_size, WindowDraw.distance_h_size, distance_v_offset, distance_h_begin)
+	# 	WindowDraw.distance_window.refresh()
+
+	def print_distance(_driven_distance, _track_length, percent_distance):
+		distance_v_begin = WindowDraw.window_rows - DISTANCE_OFFSET - 1
+		distance_h_begin = 0
+
+		distance_size = int(WindowDraw.window_cols * percent_distance / 100)
+		rest_distance = WindowDraw.window_cols - distance_size
+
+		try:
+			WindowDraw.window.addstr(distance_v_begin, distance_h_begin, '▓' * distance_size, curses.color_pair(WindowDraw.DISTANCE_COLOR))
+			WindowDraw.window.addstr(distance_v_begin, distance_h_begin + distance_size, ' ' * rest_distance, curses.color_pair(WindowDraw.DISTANCE_COLOR))
+		except curses.error:
+			return
+		# WindowDraw.window.addstr(distance_v_begin, distance_h_begin, str(WindowDraw.distance_h_size), curses.color_pair(WindowDraw.RPM_COLOR))
 
 	def draw_rpm_bar():
 		rpm_h_begin = 1
@@ -369,206 +475,173 @@ class WindowDraw:
 
 		try:
 			if rpm <= idle_rpm:
-				WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, '█' * rpm_size, curses.color_pair(RPM_LOW_COLOR))
+				WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, '█' * rpm_size, curses.color_pair(WindowDraw.RPM_LOW_COLOR))
 			else:
-				WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, '█' * WindowDraw.rpm_idle_size, curses.color_pair(RPM_LOW_COLOR))
+				WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin, '█' * WindowDraw.rpm_idle_size, curses.color_pair(WindowDraw.RPM_LOW_COLOR))
 				if rpm_size <= WindowDraw.rpm_shift_light_size:
-					WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_idle_size, '█' * (rpm_size - WindowDraw.rpm_idle_size), curses.color_pair(RPM_COLOR))
+					WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_idle_size, '█' * (rpm_size - WindowDraw.rpm_idle_size), curses.color_pair(WindowDraw.RPM_COLOR))
 				else:
-					WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_idle_size, '█' * (WindowDraw.rpm_shift_light_size - WindowDraw.rpm_idle_size), curses.color_pair(RPM_COLOR))
+					WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_idle_size, '█' * (WindowDraw.rpm_shift_light_size - WindowDraw.rpm_idle_size), curses.color_pair(WindowDraw.RPM_COLOR))
 					if rpm_size <= WindowDraw.rpm_max_size:
-						WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_shift_light_size, '█' * (rpm_size - WindowDraw.rpm_shift_light_size), curses.color_pair(RPM_HIGH_COLOR))
+						WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_shift_light_size, '█' * (rpm_size - WindowDraw.rpm_shift_light_size), curses.color_pair(WindowDraw.RPM_HIGH_COLOR))
 					else: # super high RPM
 						fill_background = False
-						WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_shift_light_size, '█' * (WindowDraw.rpm_max_size - WindowDraw.rpm_shift_light_size + 1), curses.color_pair(RPM_HIGH_COLOR))
-						WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_max_size, '█' * 1, curses.color_pair(RPM_SUPER_HIGH_COLOR))
+						WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_shift_light_size, '█' * (WindowDraw.rpm_max_size - WindowDraw.rpm_shift_light_size + 1), curses.color_pair(WindowDraw.RPM_HIGH_COLOR))
+						WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + WindowDraw.rpm_max_size, '█' * 1, curses.color_pair(WindowDraw.RPM_SUPER_HIGH_COLOR))
 
 			if fill_background:
-				WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_size, '█' * (WindowDraw.rpm_max_size - rpm_size + 1), curses.color_pair(BACKGROUND_COLOR))
+				WindowDraw.rpm_window.addstr(rpm_info_v_begin, rpm_info_h_begin + rpm_size, '█' * (WindowDraw.rpm_max_size - rpm_size + 1), curses.color_pair(WindowDraw.BACKGROUND_COLOR))
 		except curses.error:
 			return
 
-	def recalculate_values(idle_rpm, max_rpm):
-		if max_rpm == 0:
-			max_rpm = 5000
-		
-		# if idle_rpm == 0:
-		# 	idle_rpm = 1000
+	def debug(infos):
+		debug_v_size = 4
+		debug_h_begin = 3
+		debug_v_begin = WindowDraw.window_rows - RPM_V_OFFSET - 4 - debug_v_size
 
-		WindowDraw.window_rows, WindowDraw.window_cols = window.getmaxyx()
-		window_middle = int(WindowDraw.window_cols / 2)
+		lap_time = str(infos['lap_time']).split('.')
+		best_lap_time = str(infos['best_lap_time']).split('.')
 
-		WindowDraw.rpm_max_size = int(WindowDraw.rpm_info_size)
-		WindowDraw.rpm_idle_size = int((idle_rpm / max_rpm) * WindowDraw.rpm_info_size)
-		WindowDraw.rpm_shift_light = int(max_rpm - (max_rpm * (HIGH_RPM_PERCENTAGE / 100)))
-		WindowDraw.rpm_shift_light_size = int(WindowDraw.rpm_max_size - (WindowDraw.rpm_max_size * (HIGH_RPM_PERCENTAGE / 100)))
+		lap_sep = '  | ' if len(lap_time[1]) == 1 else ' | '
+
+		distance_info =  "dist.: " + str(infos["distance_driven"]) + " / " + str(infos["track_length"]) + " | " + str(infos['percent_distance']) + "%   "
+		speed_info =     "speed: " + str(infos["speed"]) +     " Km/h   "
+		max_speed_info = "  max: " + str(infos["max_speed"]) + " Km/h   "
+		lap_info =       "  lap: " + strftime("%M:%S", gmtime(int(lap_time[0]))) + "." + lap_time[1] + lap_sep + str(infos['completed_laps']) + "/" + str(infos['total_laps']) + "    "
+		best_lap_info =  " best: " + strftime("%M:%S", gmtime(int(best_lap_time[0]))) + "." + best_lap_time[1] + "   "
+
+		try:
+			WindowDraw.window.addstr(debug_v_begin + 0, debug_h_begin, distance_info, curses.color_pair(WindowDraw.GEAR_COLOR))
+			WindowDraw.window.addstr(debug_v_begin + 1, debug_h_begin, speed_info, curses.color_pair(WindowDraw.GEAR_COLOR))
+			WindowDraw.window.addstr(debug_v_begin + 2, debug_h_begin, max_speed_info, curses.color_pair(WindowDraw.GEAR_COLOR))
+			WindowDraw.window.addstr(debug_v_begin + 3, debug_h_begin, lap_info, curses.color_pair(WindowDraw.GEAR_COLOR))
+			WindowDraw.window.addstr(debug_v_begin + 4, debug_h_begin, best_lap_info, curses.color_pair(WindowDraw.GEAR_COLOR))
+		except curses.error:
+			return
 
 
-start_time = time.time()
-max_fake_gears = 7
-max_fake_speed = 300
-min_fake_speed = (max_fake_speed / 10) * -1
-speed_by_gear = max_fake_speed / max_fake_gears
-max_rpm_variation = 100
-completed_laps = 0
-last_data = {
-	"run_time": 0.0,
-	"lap_time": 0,
-	"speed": 0,
-	"gear": 0,
-	"rpm": 900,
-	"max_rpm": 7000,
-	"idle_rpm": 900,
-	"completed_laps": 0,
-	"total_laps": random.choice([0, 1, 2, 3, 4, 5]),
-	"position_x": 0.0,
-	"position_y": 0.0,
-	"position_z": 0.0,
-	"g_force_lat": 0.0,
-	"g_force_lon": 0.0,
-	"speed_x": 0,
-	"speed_y": 0
-}
-def generate_fake_data():
-	global last_data
-	global start_time
-	global completed_laps
-
-	time.sleep(FAKE_DATA_INTERVAL)
-	delta_speed = random.choice([-2, -1, 0, 1, 2])
-	speed = last_data['speed'] + delta_speed
-
-	if random.randrange(1, 40, 1) == 1:
-		completed_laps = last_data['completed_laps'] + 1
-		start_time = time.time()
-
-	run_time = time.time() - start_time
-
-	# speed adjust
-	if speed >= max_fake_speed * 2 / 3:
-		speed -= 1
-	elif speed <= max_fake_speed / 10:
-		speed += 1
-	if speed > max_fake_speed:
-		speed = max_fake_speed
-	elif speed < min_fake_speed:
-		speed = min_fake_speed
-	
-	# gear adjust
-	if MORE_RANDOM:
-		gear = random.randrange(-1, 10)
-	else:
-		if speed < 0:
-			gear = 0 if last_data['gear'] >= 1 else -1
-		else:
-			gear = 0 if last_data['gear'] < 0 else round(speed / speed_by_gear)
-	
-	# rpm adjust
-	rpm = ((speed % speed_by_gear) / speed_by_gear) * (last_data['max_rpm'] - last_data['idle_rpm']) + last_data['idle_rpm']
-	if rpm + max_rpm_variation > last_data['rpm']:
-		rpm = last_data['rpm'] + max_rpm_variation
-	elif rpm - max_rpm_variation < last_data['rpm']: 
-		rpm = last_data['rpm'] - max_rpm_variation
-	
-	# lap adjust
-	if completed_laps > last_data['total_laps']:
-		completed_laps = 0
-	
-	# position
-	delta_x = delta_speed * random.uniform(0, 1)
-	position_x = last_data['position_x'] + delta_x
-	position_y = last_data['position_y'] + random.choice([-0.003, -0.002, -0.001, -0.001, 0, 0, 0, 0.01, 0.001, 0.002, 0.003])
-	position_z = last_data['position_z'] + delta_speed - delta_x
-
-	# g forces
-	g_force_lat = random.uniform(0, 1)/10
-	g_force_lon = random.uniform(0, 1)/10
-	
-	last_data =  {
-		"run_time": round(run_time, 1),
-		"lap_time": round(run_time, 1),
-		"speed": speed,
-		"gear": gear,
-		"rpm": int(rpm),
-		"max_rpm": last_data['max_rpm'],
-		"idle_rpm": last_data['idle_rpm'],
-		"completed_laps": completed_laps,
-		"total_laps": last_data['total_laps'],
-		"position_x": position_x,
-		"position_y": position_y,
-		"position_z": position_z,
-		"g_force_lat": g_force_lat,
-		"g_force_lon": g_force_lon
+class FakeData:
+	start_time = time.time()
+	max_fake_gears = 7
+	max_fake_speed = 300
+	min_fake_speed = (max_fake_speed / 10) * -1
+	speed_by_gear = max_fake_speed / max_fake_gears
+	max_rpm_variation = 100
+	completed_laps = 0
+	distance_driven = 0
+	track_length = random.randrange(3000, 30000, 100)
+	last_data = {
+		"run_time": 0.0,
+		"lap_time": 0,
+		"speed": 0,
+		"gear": 0,
+		"rpm": 900,
+		"max_rpm": 7000,
+		"idle_rpm": 900,
+		"completed_laps": 0,
+		"total_laps": random.choice([0, 1, 2, 3, 4, 5]),
+		"position_x": 0.0,
+		"position_y": 0.0,
+		"position_z": 0.0,
+		"g_force_lat": 0.0,
+		"g_force_lon": 0.0,
+		"speed_x": 0,
+		"speed_y": 0,
+		"distance_driven": 0,
+		"track_length": 0,
+		"percent_distance": 0
 	}
+		
+	def generate_fake_data():
+		time.sleep(FAKE_DATA_INTERVAL)
+		delta_speed = random.choice([-2, -1, 0, 1, 2])
+		speed = FakeData.last_data['speed'] + delta_speed
 
-	return last_data
+		if random.randrange(1, 40, 1) == 1:
+			FakeData.completed_laps = FakeData.last_data['completed_laps'] + 1
+			FakeData.start_time = time.time()
 
+		run_time = time.time() - FakeData.start_time
 
-def send_info_socket(infos):
-	global cc
-	global addr
+		# speed adjust
+		if speed >= FakeData.max_fake_speed * 2 / 3:
+			speed -= 1
+		elif speed <= FakeData.max_fake_speed / 10:
+			speed += 1
+		if speed > FakeData.max_fake_speed:
+			speed = FakeData.max_fake_speed
+		elif speed < FakeData.min_fake_speed:
+			speed = FakeData.min_fake_speed
+		
+		# gear adjust
+		if MORE_RANDOM:
+			gear = random.randrange(-1, 10)
+		else:
+			if speed < 0:
+				gear = 0 if FakeData.last_data['gear'] >= 1 else -1
+			else:
+				gear = 0 if FakeData.last_data['gear'] < 0 else round(speed / FakeData.speed_by_gear)
+		
+		# rpm adjust
+		rpm = ((speed % FakeData.speed_by_gear) / FakeData.speed_by_gear) * (FakeData.last_data['max_rpm'] - FakeData.last_data['idle_rpm']) + FakeData.last_data['idle_rpm']
+		if rpm + FakeData.max_rpm_variation > FakeData.last_data['rpm']:
+			rpm = FakeData.last_data['rpm'] + FakeData.max_rpm_variation
+		elif rpm - FakeData.max_rpm_variation < FakeData.last_data['rpm']: 
+			rpm = FakeData.last_data['rpm'] - FakeData.max_rpm_variation
+		
+		# lap adjust
+		if FakeData.completed_laps > FakeData.last_data['total_laps']:
+			FakeData.completed_laps = 0
+		
+		# position
+		delta_x = delta_speed * random.uniform(0, 1)
+		position_x = FakeData.last_data['position_x'] + delta_x
+		position_y = FakeData.last_data['position_y'] + random.choice([-0.003, -0.002, -0.001, -0.001, 0, 0, 0, 0.01, 0.001, 0.002, 0.003])
+		position_z = FakeData.last_data['position_z'] + delta_speed - delta_x
 
-	ret_data = [
-		HIGH_RPM_PERCENTAGE,
-		HIGH_RPM_PERCENTAGE_STEPS,
-		infos['rpm'],
-		infos['max_rpm'],
-		infos['position_x'],
-		infos['position_y'],
-		infos['position_z'],
-		infos['g_force_lat'],
-		infos['g_force_lon'],
-		infos['gear']
-	]
+		# g forces
+		g_force_lat = random.uniform(0, 1)/10
+		g_force_lon = random.uniform(0, 1)/10
 
-	try:
-		cc.send(struct.pack('<10f',*ret_data))
-	except Exception as e:
-		print(e)
-		cc, addr = ss.accept()
-
-
-def read_data():
-	if SIMULATED_DATA:
-		infos = generate_fake_data()
-	else:
-		data, addr = sock.recvfrom(1024) # buffer size
-		infos = {
-			"run_time": round(bit_stream_to_float32(data, RUN_TIME), 1),
-			"lap_time": round(bit_stream_to_float32(data, LAP_TIME), 2),
-			"speed": round(bit_stream_to_float32(data, SPEED_POS) * 3.6),
-			"gear": int(bit_stream_to_float32(data, GEAR_POS)),
-			"rpm": int(bit_stream_to_float32(data, RPM_POS)),
-			"max_rpm": int(bit_stream_to_float32(data, MAX_RPM_POS)),
-			"idle_rpm": int(bit_stream_to_float32(data, IDLE_RPM_POS)),
-			"completed_laps": int(bit_stream_to_float32(data, COMPLETED_LAPS)),
-			"total_laps": int(bit_stream_to_float32(data, TOTAL_LAPS)),
-			"position_x": round(bit_stream_to_float32(data, POSITION_X), 3),
-			"position_y": round(bit_stream_to_float32(data, POSITION_Y), 3),
-			"position_z": round(bit_stream_to_float32(data, POSITION_Z), 3),
-			"g_force_lat": round(bit_stream_to_float32(data, G_FORCE_LAT), 3),
-			"g_force_lon": round(bit_stream_to_float32(data, G_FORCE_LON), 3),
-			"max_speed": 0
+		# distances
+		FakeData.distance_driven += random.randrange(0, 10, 1)
+		if FakeData.distance_driven > FakeData.track_length:
+			FakeData.track_length = random.randrange(3000, 30000, 100)
+			FakeData.distance_driven = 0
+		
+		percent_distance = 0 if FakeData.track_length == 0 else int(FakeData.distance_driven / FakeData.track_length * 100)
+		
+		FakeData.last_data = {
+			"run_time": round(run_time, 1),
+			"lap_time": round(run_time, 1),
+			"speed": speed,
+			"gear": gear,
+			"rpm": int(rpm),
+			"max_rpm": FakeData.last_data['max_rpm'],
+			"idle_rpm": FakeData.last_data['idle_rpm'],
+			"completed_laps": FakeData.completed_laps,
+			"total_laps": FakeData.last_data['total_laps'],
+			"position_x": position_x,
+			"position_y": position_y,
+			"position_z": position_z,
+			"g_force_lat": g_force_lat,
+			"g_force_lon": g_force_lon,
+			"track_length": round(FakeData.track_length / 1000.0, 1),
+			"distance_driven": round(FakeData.distance_driven / 1000.0, 1),
+			"percent_distance": percent_distance
 		}
-		if infos['rpm'] == 0:
-			infos['gear'] = -2
 
-	if RESEND_INFOS:
-		send_info_socket(infos)
-
-	return infos
+		return FakeData.last_data
 
 
 def main():
-	global window_rows
-	global window_cols
-
 	TelemetryData.setup()
 	Retransmit.setup()
+	WindowDraw.setup()
 
 	time.sleep(INITIAL_SLEEP)
 	
-	draw_interface()
+	WindowDraw.draw_interface()
 	last_gear = None
 	last_max_rpm = None
 	last_max_speed = 0
@@ -583,31 +656,29 @@ def main():
 	# skip_frame_count = 0
 
 	while True:
-		infos = read_data()
+		infos = TelemetryData.read_data()
 
+		# # small optimization, process only every 2 data received
 		# skip_frame_count += 1
-
-		# small optimization, process only every 2 data received
 		# if skip_frame_count % 2 == 0:
 		# 	skip_frame_count = 0
 		# else:
 		# 	next
 
-		event = window.getch()
-
+		# event = WindowDraw.window.getch()
 		# if event == curses.KEY_MOUSE:
 		# 	_id, mx, my, _mz, _bstate = curses.getmouse()
 		# 	button_interaction(mx, my)
 
 		position = 0
 
-		resized = curses.is_term_resized(window_rows, window_cols)
+		resized = curses.is_term_resized(WindowDraw.window_rows, WindowDraw.window_cols)
 		if resized:
-			recalculate_values(infos['idle_rpm'], infos['max_rpm'])
-			draw_interface()
+			WindowDraw.recalculate_values(infos['idle_rpm'], infos['max_rpm'])
+			WindowDraw.draw_interface()
 
-		if last_max_rpm != infos['max_rpm'] or rpm_max_size == 0:
-			recalculate_values(infos['idle_rpm'], infos['max_rpm'])
+		if last_max_rpm != infos['max_rpm'] or WindowDraw.rpm_max_size == 0:
+			WindowDraw.recalculate_values(infos['idle_rpm'], infos['max_rpm'])
 			last_max_rpm = infos['max_rpm']
 			last_lap_time = 0
 			if infos['max_rpm'] != 0:
@@ -615,16 +686,18 @@ def main():
 				best_lap_time = 0.00
 				last_completed_laps = 0
 
-		print_shift_light(infos['rpm'])
+		WindowDraw.print_shift_light(infos['rpm'])
 
-		print_rpm(infos['rpm'], infos['max_rpm'], infos['idle_rpm'])
-		rpm_window.refresh()
-		shiftlight_window[LEFT].refresh()
-		shiftlight_window[RIGHT].refresh()
+		WindowDraw.print_rpm(infos['rpm'], infos['max_rpm'], infos['idle_rpm'])
+		WindowDraw.rpm_window.refresh()
+		WindowDraw.shiftlight_window[WindowDraw.LEFT].refresh()
+		WindowDraw.shiftlight_window[WindowDraw.RIGHT].refresh()
+
+		WindowDraw.print_distance(infos['distance_driven'], infos['track_length'], infos['percent_distance'])
 		
 		if infos['gear'] != last_gear:
-			print_gear(infos['gear'])
-			gear_window.refresh()
+			WindowDraw.print_gear(infos['gear'])
+			WindowDraw.gear_window.refresh()
 			last_gear = infos['gear']
 		
 		if last_max_speed < infos['speed']:
@@ -644,36 +717,10 @@ def main():
 
 		infos['best_lap_time'] = best_lap_time
 
-		debug(infos)
+		WindowDraw.debug(infos)
 
-		window.addstr(0, 0, '')
-		window.refresh()
-
-
-def debug(infos):
-	global window_rows
-
-	debug_v_size = 4
-	debug_h_begin = 3
-	debug_v_begin = window_rows - RPM_V_OFFSET - 4 - debug_v_size
-
-	lap_time = str(infos['lap_time']).split('.')
-	best_lap_time = str(infos['best_lap_time']).split('.')
-
-	lap_sep = '  | ' if len(lap_time[1]) == 1 else ' | '
-
-	speed_info =     "speed: " + str(infos["speed"]) +     " Km/h   "
-	max_speed_info = "  max: " + str(infos["max_speed"]) + " Km/h   "
-	lap_info =       "  lap: " + strftime("%M:%S", gmtime(int(lap_time[0]))) + "." + lap_time[1] + lap_sep + str(infos['completed_laps']) + " / " + str(infos['total_laps']) + "      "
-	best_lap_info =  " best: " + strftime("%M:%S", gmtime(int(best_lap_time[0]))) + "." + best_lap_time[1] + "   "
-
-	try:
-		window.addstr(debug_v_begin + 1, debug_h_begin, speed_info, curses.color_pair(WindowDraw.GEAR_COLOR))
-		window.addstr(debug_v_begin + 2, debug_h_begin, max_speed_info, curses.color_pair(WindowDraw.GEAR_COLOR))
-		window.addstr(debug_v_begin + 3, debug_h_begin, lap_info, curses.color_pair(WindowDraw.GEAR_COLOR))
-		window.addstr(debug_v_begin + 4, debug_h_begin, best_lap_info, curses.color_pair(WindowDraw.GEAR_COLOR))
-	except curses.error:
-		return
+		WindowDraw.window.addstr(0, 0, '')
+		WindowDraw.window.refresh()
 
 
 def exit_gracefully(*args):
