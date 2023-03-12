@@ -3,10 +3,17 @@
 import socket
 import sys
 import struct
-import RPi.GPIO as GPIO
 import signal
 import time
 import subprocess
+import threading
+
+import board
+import RPi.GPIO as GPIO
+import busio
+from adafruit_mcp230xx.mcp23017 import MCP23017
+import adafruit_mcp4725
+# from luma.oled.device import ssd1331
 
 SERVER_PORT = 20778
 
@@ -19,6 +26,7 @@ POSITION_Y_POS = 5
 POSITION_Z_POS = 6
 G_FORCE_LAT_POS = 7
 G_FORCE_LON_POS = 8
+GEAR_POS = 9
 
 
 # arguments
@@ -53,37 +61,309 @@ class GpioCalls:
 		GpioCalls.output(pin, GPIO.HIGH)
 	
 	def hello():
-		for gpio_led in reversed(RpmLeds.GPIO_HIGH_LED):
-			GpioCalls.output(gpio_led, GPIO.HIGH)
+		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
+			ShiftLightLeds.set_onoff(pin_position, True)
 			time.sleep(0.1)
 		
 		for _ in range(5):
-			GpioCalls.output(RpmLeds.RED_LED, GPIO.LOW)
+			ShiftLightLeds.set_onoff(ShiftLightLeds.RED_LED_1, False)
 			time.sleep(0.06)
-			GpioCalls.output(RpmLeds.RED_LED, GPIO.HIGH)
+			ShiftLightLeds.set_onoff(ShiftLightLeds.RED_LED_1, True)
 			time.sleep(0.04)
 		
 		time.sleep(0.5)
 
-		for gpio_led in RpmLeds.GPIO_HIGH_LED:
-			GpioCalls.output(gpio_led, GPIO.LOW)
+		for pin_position in reversed(ShiftLightLeds.SHIFTLIGHT_LEDS):
+			ShiftLightLeds.set_onoff(pin_position, False)
 			time.sleep(0.1)
 
 
-class RpmLeds:
-	GREEN_LED = 22
-	YELLOW_LED = 27
-	MAIN_RED_LED = 17
-	RED_LED = 4
-	GPIO_HIGH_LED = [RED_LED, MAIN_RED_LED, YELLOW_LED, GREEN_LED]
+# multi port
+class Mcp23017Calls:
+	ADDRESS = 0x20
+	# 0 to 7 for the GPIOA0...GPIOA7, 8 to 15 for the GPIOB0...GPIOB7
+	GPIOA = [0, 1, 2, 3, 4, 5, 6, 7]
+	GPIOB = [8, 9, 10, 11, 12, 13, 14, 15]
+	# reference:
+	# https://learn.adafruit.com/adafruit-mcp23017-i2c-gpio-expander/python-circuitpython
+
+	mcp = None
+
+	pins = []
 
 	def setup():
-		for gpio_led in RpmLeds.GPIO_HIGH_LED:
-			GPIO.setup(gpio_led, GPIO.OUT)
+		# Specify the new address with a keyword parameter if you set any of the A0, A1, A2
+		# mcp = MCP23017(i2c, address=0x21)  # MCP23017 w/ A0 set
+		# For the MCP23017 you specify a pin number from
+		# 0 to 7 for the GPIOA0...GPIOA7, 8 to 15 for the GPIOB0...GPIOB7 pins (i.e. pin 12 is GPIOB4)
+		i2c = busio.I2C(board.SCL, board.SDA)
+		Mcp23017Calls.mcp = MCP23017(i2c, address=Mcp23017Calls.ADDRESS)
+		for _ in range(16): # 0..15
+			Mcp23017Calls.pins.append(None)
+	
+	def set_pin(position):
+		Mcp23017Calls.pins[position] = Mcp23017Calls.mcp.get_pin(position)
+		Mcp23017Calls.pins[position].switch_to_output(value=True)
+		# pin.direction = digitalio.Direction.INPUT
+	
+	def test_all(value = True):
+		for position in range(16): # 0..15
+			Mcp23017Calls.set_pin(position)
+			Mcp23017Calls.pins[position].value = value
+	
+	def output(position, value = True):
+		Mcp23017Calls.pins[position].value = value
+	
+	def blink(position, sleep_time):
+		Mcp23017Calls.pins[position].value = True
+		time.sleep(sleep_time)
+		Mcp23017Calls.pins[position].value = False
+	
+	def inverted_blink(position, sleep_time):
+		Mcp23017Calls.pins[position].value = False
+		time.sleep(sleep_time)
+		Mcp23017Calls.pins[position].value = True
+
+
+# binary to analog 
+class Mcp4725Calls:
+	ADDRESS = 0x60
+	MAX_VALUE = 65535 # 16 bit, 3,3V
+	MAX_RAW_VALUE = 4095 # 12 bit, 3,3V
+	MIN_NORMALIZED_VALUE = 0.1 # 
+	MAX_NORMALIZED_VALUE = 1.0 # 0.0 - 1.0, 3,3V
+
+	dac = None
+
+	# 3 ways to use:
+	# dac.value for 16-bit value (0-65535)
+	# dac.raw_value for 12-bit value (0-4095)
+	# dac.normalized_value for 0.0 to 1.0
+
+	def setup():
+		i2c = busio.I2C(board.SCL, board.SDA)
+		Mcp4725Calls.dac = adafruit_mcp4725.MCP4725(i2c, address=Mcp4725Calls.ADDRESS)
+	
+	def set_normalized_value(norm_value):
+		if norm_value > Mcp4725Calls.MAX_NORMALIZED_VALUE:
+			norm_value = Mcp4725Calls.MAX_NORMALIZED_VALUE
+		
+		Mcp4725Calls.dac.normalized_value = norm_value
+
+
+class ShiftLightLeds:
+	GREEN_LED_1 = Mcp23017Calls.GPIOA[7]
+	YELLOW_LED_1 = Mcp23017Calls.GPIOA[6]
+	YELLOW_LED_2 = Mcp23017Calls.GPIOA[5]
+	RED_LED_1 = Mcp23017Calls.GPIOA[4] # high RPM, main shift light
+	RED_LED_2 = Mcp23017Calls.GPIOA[3] # very high RPM
+	SHIFTLIGHT_LEDS = [GREEN_LED_1, YELLOW_LED_1, YELLOW_LED_2, RED_LED_1, RED_LED_2]
+	SHIFTLIGHT_LEDS_SIZE = len(SHIFTLIGHT_LEDS)
+
+	def setup():
+		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
+			Mcp23017Calls.set_pin(pin_position)
 
 	def clear_output():
-		for gpio_led in RpmLeds.GPIO_HIGH_LED:
-			GpioCalls.output(gpio_led, GPIO.LOW)
+		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
+			Mcp23017Calls.output(pin_position, False)
+	
+	def set_onoff(pin_position, value = True):
+		Mcp23017Calls.output(pin_position, value)
+	
+	def blink(pin_position, sleep_time):
+		Mcp23017Calls.blink(pin_position, sleep_time)
+	
+	def inverted_blink(pin_position, sleep_time):
+		Mcp23017Calls.inverted_blink(pin_position, sleep_time)
+	
+	def test_all(value = True):
+		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
+			Mcp23017Calls.output(pin_position, value)
+
+	def hello():
+		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
+			ShiftLightLeds.set_onoff(pin_position, True)
+			time.sleep(0.1)
+		
+		for _ in range(5):
+			ShiftLightLeds.set_onoff(ShiftLightLeds.RED_LED_2, False)
+			time.sleep(0.06)
+			ShiftLightLeds.set_onoff(ShiftLightLeds.RED_LED_2, True)
+			time.sleep(0.04)
+		
+		time.sleep(0.5)
+
+		for pin_position in reversed(ShiftLightLeds.SHIFTLIGHT_LEDS):
+			ShiftLightLeds.set_onoff(pin_position, False)
+			time.sleep(0.1)
+
+
+class Vibration:
+	def setup():
+		Mcp4725Calls.set_normalized_value(0.0)
+
+	def clear_output():
+		Mcp4725Calls.set_normalized_value(0.0)
+	
+	def set_normalized_value(norm_value):
+		Mcp4725Calls.set_normalized_value(norm_value)
+	
+	def hello():
+		norm_value = 0.0
+
+		for _ in ShiftLightLeds.SHIFTLIGHT_LEDS:
+			norm_value += 0.2
+			Mcp4725Calls.set_normalized_value(norm_value)
+			time.sleep(0.1)
+		
+		for _ in range(5):
+			norm_value -= 0.2
+			Mcp4725Calls.set_normalized_value(norm_value)
+			time.sleep(0.06)
+			norm_value += 0.2
+			Mcp4725Calls.set_normalized_value(norm_value)
+			time.sleep(0.04)
+		
+		time.sleep(0.5)
+
+		for _ in ShiftLightLeds.SHIFTLIGHT_LEDS:
+			norm_value -= 0.2
+			Mcp4725Calls.set_normalized_value(norm_value)
+			time.sleep(0.1)
+
+
+class Display7Segments:
+	last_state = {
+		'on': [],
+		'off': []
+	}
+
+	# top connections:
+	CAT_G = Mcp23017Calls.GPIOB[4]
+	CAT_F = Mcp23017Calls.GPIOB[5]
+	CAT_A = Mcp23017Calls.GPIOB[6]
+	CAT_B = Mcp23017Calls.GPIOB[7]
+	# bottom connections:
+	CAT_E = Mcp23017Calls.GPIOB[3]
+	CAT_D = Mcp23017Calls.GPIOB[2]
+	CAT_C = Mcp23017Calls.GPIOB[1]
+	CAT_H = Mcp23017Calls.GPIOB[0] # dot
+	#   A
+	# F   B
+	#   G
+	# E   C
+	#   D  H 
+
+	GEAR_LEDS = [CAT_A, CAT_B, CAT_C, CAT_D, CAT_E, CAT_F, CAT_G, CAT_H]
+
+	def setup():
+		for pin_position in Display7Segments.GEAR_LEDS:
+			Mcp23017Calls.set_pin(pin_position)
+	
+	def clear_output():
+		for pin_position in Display7Segments.GEAR_LEDS:
+			Mcp23017Calls.output(pin_position, False)
+	
+	def test_all(value = True):
+		for pin_position in Display7Segments.GEAR_LEDS:
+			Mcp23017Calls.output(pin_position, value)
+	
+	def set_segment(pin_position, value):
+		Mcp23017Calls.output(pin_position, value)
+	
+	@classmethod
+	def set_gear(cls, gear = None):
+		segments = {
+			'on': [],
+			'off': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_G, cls.CAT_H]
+		}
+
+		if gear == -1:
+			segments = {
+				'on': [cls.CAT_B, cls.CAT_C, cls.CAT_G],
+				'off': [cls.CAT_A, cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_H]
+			}
+		elif gear == 0:
+			segments = {
+				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_D, cls.CAT_E, cls.CAT_F],
+				'off': [cls.CAT_G, cls.CAT_H]
+			}
+		elif gear == 1:
+			segments = {
+				'on': [cls.CAT_B, cls.CAT_C],
+				'off': [cls.CAT_A, cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_G, cls.CAT_H]
+			}
+		elif gear == 2:
+			segments = {
+				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_G, cls.CAT_E, cls.CAT_D],
+				'off': [cls.CAT_C, cls.CAT_F, cls.CAT_H]
+			}
+		elif gear == 3:
+			segments = {
+				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_D, cls.CAT_G],
+				'off': [cls.CAT_E, cls.CAT_F, cls.CAT_H]
+			}
+		elif gear == 4:
+			segments = {
+				'on': [cls.CAT_F, cls.CAT_G, cls.CAT_B, cls.CAT_C],
+				'off': [cls.CAT_A, cls.CAT_D, cls.CAT_E, cls.CAT_H]
+			}
+		elif gear == 5:
+			segments = {
+				'on': [cls.CAT_A, cls.CAT_F, cls.CAT_G, cls.CAT_C, cls.CAT_D],
+				'off': [cls.CAT_B, cls.CAT_E, cls.CAT_H]
+			}
+		elif gear == 6:
+			segments = {
+				'on': [cls.CAT_A, cls.CAT_F, cls.CAT_G, cls.CAT_C, cls.CAT_D, cls.CAT_E],
+				'off': [cls.CAT_B, cls.CAT_H]
+			}
+		elif gear == 7:
+			segments = {
+				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C],
+				'off': [cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_G, cls.CAT_H]
+			}
+		elif gear == 8:
+			segments = {
+				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_G],
+				'off': [cls.CAT_H]
+			}
+		elif gear == 9:
+			segments = {
+				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_F, cls.CAT_G],
+				'off': [cls.CAT_D, cls.CAT_E, cls.CAT_H]
+			}
+			
+		# optimizing display speed by removing from array segments what is already on or off
+		# Debug.p('____gear: %s'%(gear))
+		# Debug.p(Display7Segments.last_state)
+		# Debug.p(segments)
+		opt_segments = segments.copy()
+		for segment in Display7Segments.last_state['off']:
+			try:
+				opt_segments['off'].remove(segment)
+			except ValueError:
+				pass  # do nothing!
+		for segment in Display7Segments.last_state['on']:
+			try:
+				opt_segments['on'].remove(segment)
+			except ValueError:
+				pass  # do nothing!
+		Display7Segments.last_state = segments.copy()
+		# Debug.p(opt_segments)
+
+		for segment in segments['off']:
+			Display7Segments.set_segment(segment, False)
+		for segment in segments['on']:
+			Display7Segments.set_segment(segment, True)
+
+	def hello():
+		for gear in range(-1, 10):
+			Display7Segments.set_gear(gear)
+			time.sleep(0.1)
+		Display7Segments.set_gear()
+	
 
 
 class DataComunication:
@@ -114,9 +394,9 @@ class DataComunication:
 		return DataComunication.network_ips
 
 	def try_to_connect_socket(self):
-		RpmLeds.clear_output()
+		ShiftLightLeds.clear_output()
 
-		GpioCalls.output(RpmLeds.YELLOW_LED, GPIO.HIGH)
+		ShiftLightLeds.set_onoff(ShiftLightLeds.YELLOW_LED_1, True)
 
 		found = False
 
@@ -133,7 +413,7 @@ class DataComunication:
 			if DataComunication.server_ip:
 				Debug.p("Trying to connect to %s : %s" %(DataComunication.server_ip, server_port_now))
 				try:
-					GpioCalls.inverted_blink(RpmLeds.YELLOW_LED, 0.1)
+					ShiftLightLeds.inverted_blink(ShiftLightLeds.YELLOW_LED_1, 0.1)
 					DataComunication.sock.connect((DataComunication.server_ip, server_port_now))
 					found = True
 					Debug.p("Connected to %s : %s" %(DataComunication.server_ip, server_port_now))
@@ -146,7 +426,7 @@ class DataComunication:
 				for ip in DataComunication.get_network_ips():
 					Debug.p("Trying to connect to %s : %s" %(ip, server_port_now))
 					try:
-						GpioCalls.inverted_blink(RpmLeds.YELLOW_LED, 0.1)
+						ShiftLightLeds.inverted_blink(ShiftLightLeds.YELLOW_LED_1, 0.1)
 						DataComunication.sock.connect((ip, server_port_now))  # connect to specific ip
 						DataComunication.server_ip = ip
 						found = True
@@ -159,12 +439,11 @@ class DataComunication:
 			# alternate between ports SERVER_PORT and SERVER_PORT + 1
 			server_port_now = server_port_now + 1 if server_port_now == SERVER_PORT else SERVER_PORT
 
-		GpioCalls.output(RpmLeds.YELLOW_LED, GPIO.LOW)
-		GpioCalls.output(RpmLeds.GREEN_LED, GPIO.HIGH)
+		ShiftLightLeds.set_onoff(ShiftLightLeds.YELLOW_LED_1, False)
 
-		time.sleep(0.7)
-		GpioCalls.output(RpmLeds.GREEN_LED, GPIO.LOW)
-		RpmLeds.clear_output()
+		threading.Thread(target=ShiftLightLeds.blink, args=[ShiftLightLeds.GREEN_LED_1, 1]).start()
+
+		ShiftLightLeds.clear_output()
 
 	def bit_stream_to_float32(self, pos):
 		byte_size = 4
@@ -198,6 +477,7 @@ class DataComunication:
 				"position_x": round(self.bit_stream_to_float32(POSITION_X_POS), 3),
 				"position_y": round(self.bit_stream_to_float32(POSITION_Y_POS), 3),
 				"position_z": round(self.bit_stream_to_float32(POSITION_Z_POS), 3),
+				"gear": int(self.bit_stream_to_float32(GEAR_POS))
 			}
 		except:
 			Debug.p("====read_data except")
@@ -224,7 +504,7 @@ class Telemetry:
 	infos = {}
 
 	def __init__(self):
-		for _gpio_led in RpmLeds.GPIO_HIGH_LED:
+		for _gpio_led in ShiftLightLeds.SHIFTLIGHT_LEDS:
 			self.last_shift_light_states.append(None)
 
 	def recalculate_values(self):
@@ -243,7 +523,7 @@ class Telemetry:
 				return
 			# if not cleared yet, clear
 			else:
-				RpmLeds.clear_output()
+				ShiftLightLeds.clear_output()
 				# mark as cleared
 				self.clear_state = True
 				return
@@ -253,59 +533,102 @@ class Telemetry:
 			self.clear_state = False
 
 		step_count = 0
-		for gpio_led in RpmLeds.GPIO_HIGH_LED:
+		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
 			this_rpm_shift_light_step = self.rpm_shift_light - (self.rpm_shift_light_step * (step_count - 1))
 			this_shift_light_state = True if self.infos['rpm'] >= this_rpm_shift_light_step else False
 
 			if this_shift_light_state != self.last_shift_light_states[step_count]:
-				GpioCalls.output(gpio_led, GPIO.HIGH if this_shift_light_state else GPIO.LOW)
+				ShiftLightLeds.set_onoff(ShiftLightLeds.SHIFTLIGHT_LEDS[ShiftLightLeds.SHIFTLIGHT_LEDS_SIZE - step_count - 1], True if this_shift_light_state else False)
 				self.last_shift_light_states[step_count] = this_shift_light_state
 			step_count += 1
+	
+	def gear(self):
+		Display7Segments.set_gear(self.infos['gear'])
 
 	def vibration(self):
 		delta_y_1 = round(self.infos['position_y'] - self.last_y_1, 3)
 		delta_y_2 = round(self.last_y_1 - self.last_y_2, 3)
 		abs_delta = abs(delta_y_1 - delta_y_2)
-		if abs_delta >= 0.007:
-			vibrate = "7█"
-		elif abs_delta >= 0.006:
-			vibrate = "6▉"
-		elif abs_delta >= 0.005:
-			vibrate = "5▊"
-		elif abs_delta >= 0.004:
-			vibrate = "4▋"
-		elif abs_delta >= 0.003:
-			vibrate = "3▌"
-		elif abs_delta >= 0.002:
-			vibrate = "2▍"
-		elif abs_delta >= 0.001:
-			vibrate = "1▎"
-		else:
-			vibrate = "0 "
+		# if abs_delta >= 0.009:
+		# 	vibrate = "9█▍"
+		# elif abs_delta >= 0.008:
+		# 	vibrate = "8█▎"
+		# elif abs_delta >= 0.007:
+		# 	vibrate = "7█ "
+		# elif abs_delta >= 0.006:
+		# 	vibrate = "6▉ "
+		# elif abs_delta >= 0.005:
+		# 	vibrate = "5▊ "
+		# elif abs_delta >= 0.004:
+		# 	vibrate = "4▋ "
+		# elif abs_delta >= 0.003:
+		# 	vibrate = "3▌ "
+		# elif abs_delta >= 0.002:
+		# 	vibrate = "2▍ "
+		# elif abs_delta >= 0.001:
+		# 	vibrate = "1▎ "
+		# else:
+		# 	vibrate = "0  "
+		
+		norm_vibration = abs_delta * 100
+		
+		Mcp4725Calls.set_normalized_value(norm_vibration)
 
 		# print("position: ", infos['position_x'], infos['position_y'], infos['position_z'], "      ")
 		# print("vibration: ", vibrate, "{:.3f}".format(last_y_1), "{:.3f}".format(last_y_2), "=", "{:.3f}".format(delta_y_1), "{:.3f}".format(delta_y_2), "{:.3f}".format(abs_delta), "   ")
 		# print("g_force_lat: ", infos['g_force_lat'], "|", min_g_force_lat, "|", max_g_force_lat, "   ")
 		# print("g_force_lon: ", infos['g_force_lon'], "|", min_g_force_lon, "|", max_g_force_lon, "   ")
 
-		Debug.p(vibrate)
+		# Debug.p("%s %s"%(vibrate, norm_vibration))
 
 		self.last_y_2 = self.last_y_1
 		self.last_y_1 = self.infos['position_y']
 
 
+
+
 def main():
 	last_max_rpm = None
+	last_gear = None
 
-	GpioCalls.setup()
-	RpmLeds.setup()
+	# GpioCalls.setup()
+	Mcp23017Calls.setup()
+	Mcp4725Calls.setup()
 
-	RpmLeds.clear_output()
+	ShiftLightLeds.setup()
+	Display7Segments.setup()
+	Vibration.setup()
+
+	ShiftLightLeds.test_all()
+	Display7Segments.test_all()
+	time.sleep(0.5)
+	ShiftLightLeds.test_all(False)
+	Display7Segments.test_all(False)
+
+	threading.Thread(target=ShiftLightLeds.hello).start()
+	threading.Thread(target=Display7Segments.hello).start()
+	threading.Thread(target=Vibration.hello).start()
+	# ShiftLightLeds.hello()
+	# Display7Segments.hello()
 
 	data_com = DataComunication()
 	data_com.try_to_connect_socket()
+	
+	ShiftLightLeds.clear_output()
+	Display7Segments.clear_output()
+	Vibration.clear_output()
 
-	GpioCalls.hello()
+	threading.Thread(target=ShiftLightLeds.blink, args=[ShiftLightLeds.GREEN_LED_1, 1]).start()
+
+	# ShiftLightLeds.test_all()
+	# time.sleep(0.1)
+	# ShiftLightLeds.test_all(False)
+	# time.sleep(0.1)
+	# ShiftLightLeds.test_all()
+	# time.sleep(0.1)
+	# ShiftLightLeds.test_all(False)
+
+	# GpioCalls.hello()
 
 	telemetry = Telemetry()
 	
@@ -315,6 +638,13 @@ def main():
 		if last_max_rpm != telemetry.infos['max_rpm']:
 			telemetry.recalculate_values()
 			last_max_rpm = telemetry.infos['max_rpm']
+			Display7Segments.set_gear()
+			Vibration.set_normalized_value(0.0)
+		
+		# optimizing
+		if last_gear != telemetry.infos['gear']:
+			telemetry.gear()
+			last_gear = telemetry.infos['gear']
 
 		# if infos['g_force_lat'] > max_g_force_lat:
 		# 	max_g_force_lat = infos['g_force_lat']
@@ -334,7 +664,9 @@ def main():
 
 def exit_gracefully(*args):
 	DataComunication.sock.close()
-	GPIO.cleanup()
+	ShiftLightLeds.clear_output()
+	Display7Segments.clear_output()
+	Vibration.clear_output()
 	exit(0)
 
 
@@ -343,4 +675,3 @@ if __name__ == '__main__':
 		signal.signal(sig, exit_gracefully)
 	main()
 	DataComunication.sock.close()
-	GPIO.cleanup()

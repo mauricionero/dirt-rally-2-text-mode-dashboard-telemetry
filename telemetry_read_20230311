@@ -12,8 +12,6 @@
 ##################
 ## CONFIGURATIONS
 
-I2C_BUS = 10
-
 HIGH_RPM_PERCENTAGE = 7
 HIGH_RPM_PERCENTAGE_STEPS = 3
 
@@ -44,11 +42,8 @@ import random
 import sys
 import psutil
 import signal
-import threading
 from time import strftime
 from time import gmtime
-
-from smbus2 import SMBus
 # import evdev
 
 DIRT_IP = ""
@@ -104,24 +99,10 @@ class TelemetryData:
 	MAX_GEARS_POS = 65
 
 	byte_size = 4
-	clear_state = True
 
 	sock = None
 
 	infos = []
-	last_shift_light_states = []
-
-	max_g_force_lat = 0
-	max_g_force_lon = 0
-	min_g_force_lat = 0
-	min_g_force_lon = 0
-	last_max_rpm = None
-	rpm_shift_light = None
-	rpm_shift_light_step = None
-
-	def __init__(self):
-		for _gpio_led in ShiftLightLeds.SHIFTLIGHT_LEDS:
-			self.last_shift_light_states.append(None)
 
 	def setup():
 		TelemetryData.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -175,41 +156,6 @@ class TelemetryData:
 			Retransmit.send_info_socket(TelemetryData.infos)
 
 		return TelemetryData.infos
-
-	def recalculate_values(self):
-		self.max_g_force_lat = 0
-		self.max_g_force_lon = 0
-		self.min_g_force_lat = 0
-		self.min_g_force_lon = 0
-		self.rpm_shift_light = int(self.infos['max_rpm'] - (self.infos['max_rpm'] * (HIGH_RPM_PERCENTAGE / 100)))
-		self.rpm_shift_light_step = int(self.infos['max_rpm'] * (HIGH_RPM_PERCENTAGE_STEPS / 100))
-
-	def shift_light(self):
-		# if not racing
-		if self.infos['rpm'] <= 0:
-			# if already cleared
-			if self.clear_state:
-				return
-			# if not cleared yet, clear
-			else:
-				ShiftLightLeds.clear_output()
-				# mark as cleared
-				self.clear_state = True
-				return
-
-		# if starts running and has a cleared state, unclear
-		elif self.clear_state:
-			self.clear_state = False
-
-		step_count = 0
-		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
-			this_rpm_shift_light_step = self.rpm_shift_light - (self.rpm_shift_light_step * (step_count - 1))
-			this_shift_light_state = True if self.infos['rpm'] >= this_rpm_shift_light_step else False
-
-			if this_shift_light_state != self.last_shift_light_states[step_count]:
-				ShiftLightLeds.set_onoff(ShiftLightLeds.SHIFTLIGHT_LEDS[ShiftLightLeds.SHIFTLIGHT_LEDS_SIZE - step_count - 1], True if this_shift_light_state else False)
-				self.last_shift_light_states[step_count] = this_shift_light_state
-			step_count += 1
 
 
 class Retransmit:
@@ -701,320 +647,13 @@ class FakeData:
 		return FakeData.last_data
 
 
-# this can become a lib in the future
-class Mcp23017Driver:
-	# positions -> 0 to 7 for the GPIOA0...GPIOA7, 8 to 15 for the GPIOB0...GPIOB7
-
-	address = 0x20
-	bus = None
-	GPA = 0
-	GPB = 1
-	mem_inout = {
-		GPA: 0,
-		GPB: 0
-	}
-	inout_dirt = {
-		GPA: False,
-		GPB: False
-	}
-	mem_values = {
-		GPA: 0,
-		GPB: 0
-	}
-	values_dirt = {
-		GPA: False,
-		GPB: False
-	}
-
-	def __init__(self, smBus, address = 0x20):
-		self.bus = smBus
-		self.address = address
-	
-	def switch_to_output(self, position, set_output = True, dont_sync = False):
-		if position >= 8:
-			GP = self.GPB
-			pin = position - 8
-		else:
-			GP = self.GPA
-			pin = position
-		self.inout_dirt[GP] = True
-		
-		if set_output:
-			self.mem_inout[GP] &= ~(1 << pin)
-		else:
-			self.mem_inout[GP] |= (1 << pin)
-		
-		if dont_sync:
-			return
-		
-		self.sync_data()
-	
-	def set_pin_value(self, position, value, dont_sync = False):
-		if position >= 8:
-			GP = self.GPB
-			pin = position - 8
-		else:
-			GP = self.GPA
-			pin = position
-		self.values_dirt[GP] = True
-		
-		if value:
-			self.mem_values[GP] |= (1 << pin)
-		else:
-			self.mem_values[GP] &= ~(1 << pin)
-		
-		if dont_sync:
-			return
-		
-		self.sync_data()
-	
-	def sync_data(self, force = False):
-		if self.inout_dirt[self.GPA] or force:
-			self.sync_inout(self.GPA)
-		if self.inout_dirt[self.GPB] or force:
-			self.sync_inout(self.GPB)
-		if self.values_dirt[self.GPA] or force:
-			self.sync_values(self.GPA)
-		if self.values_dirt[self.GPB] or force:
-			self.sync_values(self.GPB)
-	
-	def sync_inout(self, gp):
-		command = 0x00 if gp == self.GPA else 0x01
-		self.send_data(command, self.mem_inout[gp])
-		self.inout_dirt[gp] = False
-	
-	def sync_values(self, gp):
-		command = 0x14 if gp == self.GPA else 0x15
-		self.send_data(command, self.mem_values[gp])
-		self.values_dirt[gp] = False
-	
-	def send_data(self, command, value):
-		# print(">", self.address, command, value)
-		self.bus.write_byte_data(self.address, command, value)
-
-
-# multi port
-class Mcp23017Calls:
-	ADDRESS = 0x20
-	# 0 to 7 for the GPIOA0...GPIOA7, 8 to 15 for the GPIOB0...GPIOB7
-	GPIOA = [0, 1, 2, 3, 4, 5, 6, 7]
-	GPIOB = [8, 9, 10, 11, 12, 13, 14, 15]
-	# reference:
-	# https://learn.adafruit.com/adafruit-mcp23017-i2c-gpio-expander/python-circuitpython
-
-	mcp = None
-
-	def setup():
-		# Specify the new address with a keyword parameter if you set any of the A0, A1, A2
-		# mcp = MCP23017(smBus, address=0x20)  # MCP23017 w/ A0 set
-		# For the MCP23017 you specify a pin number from
-		# 0 to 7 for the GPIOA0...GPIOA7, 8 to 15 for the GPIOB0...GPIOB7 pins (i.e. pin 12 is GPIOB4)
-		smBus = SMBus(I2C_BUS)
-		Mcp23017Calls.mcp = Mcp23017Driver(smBus, address=Mcp23017Calls.ADDRESS)
-	
-	def set_pin(position, set_output = True, dont_sync = False):
-		Mcp23017Calls.mcp.switch_to_output(position=position, set_output=set_output, dont_sync=dont_sync)
-	
-	def test_all(value = True):
-		for position in range(16): # 0..15
-			Mcp23017Calls.set_pin(position, dont_sync=True) # sync later all at once
-			Mcp23017Calls.mcp.set_pin_value(position, value, dont_sync=True) # sync later all at once
-		Mcp23017Calls.mcp.sync_data()
-	
-	def output(position, value = True, dont_sync = False):
-		Mcp23017Calls.mcp.set_pin_value(position, value, dont_sync)
-	
-	def blink(position, sleep_time):
-		Mcp23017Calls.mcp.set_pin_value(position, value=True)
-		time.sleep(sleep_time)
-		Mcp23017Calls.mcp.set_pin_value(position, value=False)
-	
-	def inverted_blink(position, sleep_time):
-		Mcp23017Calls.mcp.set_pin_value(position, value=False)
-		time.sleep(sleep_time)
-		Mcp23017Calls.mcp.set_pin_value(position, value=True)
-	
-	def sync_data():
-		Mcp23017Calls.mcp.sync_data()
-
-
-class ShiftLightLeds:
-	GREEN_LED_1 = Mcp23017Calls.GPIOA[7]
-	YELLOW_LED_1 = Mcp23017Calls.GPIOA[6]
-	YELLOW_LED_2 = Mcp23017Calls.GPIOA[5]
-	RED_LED_1 = Mcp23017Calls.GPIOA[4] # high RPM, main shift light
-	RED_LED_2 = Mcp23017Calls.GPIOA[3] # very high RPM
-	SHIFTLIGHT_LEDS = [GREEN_LED_1, YELLOW_LED_1, YELLOW_LED_2, RED_LED_1, RED_LED_2]
-	SHIFTLIGHT_LEDS_SIZE = len(SHIFTLIGHT_LEDS)
-
-	def setup():
-		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
-			Mcp23017Calls.set_pin(pin_position, set_output=True, dont_sync=True)
-		Mcp23017Calls.sync_data()
-
-	def clear_output():
-		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
-			Mcp23017Calls.output(pin_position, value=False, dont_sync=True)
-		Mcp23017Calls.sync_data()
-	
-	def set_onoff(pin_position, value = True):
-		Mcp23017Calls.output(pin_position, value)
-	
-	def blink(pin_position, sleep_time):
-		Mcp23017Calls.blink(pin_position, sleep_time)
-	
-	def inverted_blink(pin_position, sleep_time):
-		Mcp23017Calls.inverted_blink(pin_position, sleep_time)
-	
-	def test_all(value = True):
-		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
-			Mcp23017Calls.output(pin_position, value, dont_sync=True)
-		Mcp23017Calls.sync_data()
-
-	def hello():
-		for pin_position in ShiftLightLeds.SHIFTLIGHT_LEDS:
-			ShiftLightLeds.set_onoff(pin_position, True)
-			time.sleep(0.1)
-		
-		for _ in range(5):
-			ShiftLightLeds.set_onoff(ShiftLightLeds.RED_LED_2, False)
-			time.sleep(0.06)
-			ShiftLightLeds.set_onoff(ShiftLightLeds.RED_LED_2, True)
-			time.sleep(0.04)
-		
-		time.sleep(0.5)
-
-		for pin_position in reversed(ShiftLightLeds.SHIFTLIGHT_LEDS):
-			ShiftLightLeds.set_onoff(pin_position, False)
-			time.sleep(0.1)
-
-
-class Display7Segments:
-	# top connections:
-	CAT_G = Mcp23017Calls.GPIOB[4]
-	CAT_F = Mcp23017Calls.GPIOB[5]
-	CAT_A = Mcp23017Calls.GPIOB[6]
-	CAT_B = Mcp23017Calls.GPIOB[7]
-	# bottom connections:
-	CAT_E = Mcp23017Calls.GPIOB[3]
-	CAT_D = Mcp23017Calls.GPIOB[2]
-	CAT_C = Mcp23017Calls.GPIOB[1]
-	CAT_H = Mcp23017Calls.GPIOB[0] # dot
-	#   A
-	# F   B
-	#   G
-	# E   C
-	#   D  H 
-
-	GEAR_LEDS = [CAT_A, CAT_B, CAT_C, CAT_D, CAT_E, CAT_F, CAT_G, CAT_H]
-
-	def setup():
-		for pin_position in Display7Segments.GEAR_LEDS:
-			Mcp23017Calls.set_pin(pin_position, set_output=True, dont_sync=True)
-		Mcp23017Calls.sync_data()
-	
-	def clear_output():
-		for pin_position in Display7Segments.GEAR_LEDS:
-			Mcp23017Calls.output(pin_position, value=False, dont_sync=True)
-		Mcp23017Calls.sync_data()
-	
-	def test_all(value = True):
-		for pin_position in Display7Segments.GEAR_LEDS:
-			Mcp23017Calls.output(pin_position, value, dont_sync=True)
-		Mcp23017Calls.sync_data()
-	
-	def set_segment(pin_position, value, dont_sync = False):
-		Mcp23017Calls.output(pin_position, value, dont_sync)
-	
-	@classmethod
-	def set_gear(cls, gear = None):
-		segments = {
-			'on': [],
-			'off': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_G, cls.CAT_H]
-		}
-
-		if gear == -1:
-			segments = {
-				'on': [cls.CAT_B, cls.CAT_C, cls.CAT_G],
-				'off': [cls.CAT_A, cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_H]
-			}
-		elif gear == 0:
-			segments = {
-				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_D, cls.CAT_E, cls.CAT_F],
-				'off': [cls.CAT_G, cls.CAT_H]
-			}
-		elif gear == 1:
-			segments = {
-				'on': [cls.CAT_B, cls.CAT_C],
-				'off': [cls.CAT_A, cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_G, cls.CAT_H]
-			}
-		elif gear == 2:
-			segments = {
-				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_G, cls.CAT_E, cls.CAT_D],
-				'off': [cls.CAT_C, cls.CAT_F, cls.CAT_H]
-			}
-		elif gear == 3:
-			segments = {
-				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_D, cls.CAT_G],
-				'off': [cls.CAT_E, cls.CAT_F, cls.CAT_H]
-			}
-		elif gear == 4:
-			segments = {
-				'on': [cls.CAT_F, cls.CAT_G, cls.CAT_B, cls.CAT_C],
-				'off': [cls.CAT_A, cls.CAT_D, cls.CAT_E, cls.CAT_H]
-			}
-		elif gear == 5:
-			segments = {
-				'on': [cls.CAT_A, cls.CAT_F, cls.CAT_G, cls.CAT_C, cls.CAT_D],
-				'off': [cls.CAT_B, cls.CAT_E, cls.CAT_H]
-			}
-		elif gear == 6:
-			segments = {
-				'on': [cls.CAT_A, cls.CAT_F, cls.CAT_G, cls.CAT_C, cls.CAT_D, cls.CAT_E],
-				'off': [cls.CAT_B, cls.CAT_H]
-			}
-		elif gear == 7:
-			segments = {
-				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C],
-				'off': [cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_G, cls.CAT_H]
-			}
-		elif gear == 8:
-			segments = {
-				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_D, cls.CAT_E, cls.CAT_F, cls.CAT_G],
-				'off': [cls.CAT_H]
-			}
-		elif gear == 9:
-			segments = {
-				'on': [cls.CAT_A, cls.CAT_B, cls.CAT_C, cls.CAT_F, cls.CAT_G],
-				'off': [cls.CAT_D, cls.CAT_E, cls.CAT_H]
-			}
-
-		for segment in segments['off']:
-			Display7Segments.set_segment(segment, False, dont_sync=True)
-		for segment in segments['on']:
-			Display7Segments.set_segment(segment, True, dont_sync=True)
-		Mcp23017Calls.sync_data()
-
-	def hello():
-		for gear in range(-1, 10):
-			Display7Segments.set_gear(gear)
-			time.sleep(0.15)
-		Display7Segments.set_gear()
-
-
 def main():
 	TelemetryData.setup()
 	Retransmit.setup()
-
-	Mcp23017Calls.setup()
-	ShiftLightLeds.setup()
-	Display7Segments.setup()
-	threading.Thread(target=ShiftLightLeds.hello).start()
-	threading.Thread(target=Display7Segments.hello).start()
+	WindowDraw.setup()
 
 	time.sleep(INITIAL_SLEEP)
 	
-	WindowDraw.setup()
 	WindowDraw.draw_interface()
 	last_gear = None
 	last_max_rpm = None
@@ -1029,7 +668,6 @@ def main():
 
 	# skip_frame_count = 0
 
-	telemetry = TelemetryData()
 	while True:
 		infos = TelemetryData.read_data()
 
@@ -1056,14 +694,11 @@ def main():
 			WindowDraw.recalculate_values(infos['idle_rpm'], infos['max_rpm'])
 			last_max_rpm = infos['max_rpm']
 			last_lap_time = 0
-			Display7Segments.set_gear()
-			telemetry.recalculate_values()
 			if infos['max_rpm'] != 0:
 				last_max_speed = 0
 				best_lap_time = 0.00
 				last_completed_laps = 0
 
-		telemetry.shift_light()
 		WindowDraw.print_shift_light(infos['rpm'])
 
 		WindowDraw.print_rpm(infos['rpm'], infos['max_rpm'], infos['idle_rpm'])
@@ -1077,7 +712,6 @@ def main():
 			WindowDraw.print_gear(infos['gear'])
 			WindowDraw.gear_window.refresh()
 			last_gear = infos['gear']
-			Display7Segments.set_gear(infos['gear'])
 		
 		if last_max_speed < infos['speed']:
 			last_max_speed = infos['speed']
@@ -1103,17 +737,16 @@ def main():
 
 
 def exit_gracefully(*args):
-	ShiftLightLeds.clear_output()
-	Display7Segments.clear_output()
-	TelemetryData.sock.close()
-	Retransmit.ss.close()
+	global sock
+	global ss
+
+	sock.close()
+	ss.close()
 	exit(0)
 
 if __name__ == '__main__':
 	for sig in (signal.SIGABRT, signal.SIGILL, signal.SIGINT, signal.SIGSEGV, signal.SIGTERM):
 		signal.signal(sig, exit_gracefully)
 	main()
-	ShiftLightLeds.clear_output()
-	Display7Segments.clear_output()
-	Retransmit.ss.close()
-	TelemetryData.sock.close()
+	ss.close()
+	sock.close()
