@@ -1,0 +1,17 @@
+#!/usr/bin/python3
+
+from smbus2 import SMBus
+
+import board
+import busio
+
+from adafruit_mcp230xx.mcp23017 import MCP23017
+
+i2c = busio.I2C(board.SCL, board.SDA)
+Mcp23017Calls.mcp = MCP23017(i2c, address=0x20)
+
+
+bus = SMBus(10)
+bus.write_byte_data(0x20,0x00,0x00) # activate gpa, all for writing (0 is write, 1 read)
+bus.write_byte_data(0x20,0x01,0x00) # activate gpb, all for writing (0 is write, 1 read)
+bus.write_byte_data(0x20,0x14,0b11111000)

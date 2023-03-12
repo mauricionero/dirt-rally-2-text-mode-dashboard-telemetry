@@ -358,7 +358,6 @@ class Display7Segments:
 		for segment in segments['on']:
 			Display7Segments.set_segment(segment, True)
 
-	
 	def hello():
 		for gear in range(-1, 10):
 			Display7Segments.set_gear(gear)
