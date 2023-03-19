@@ -767,29 +767,29 @@ class MiniDisplay:
 		MiniDisplay.ssd.write_screen(MiniDisplay.RPM_PAGE, 'RPM', 0, 19)
 		MiniDisplay.set_rpm(10, 1000)
 
-		MiniDisplay.ssd.icon_screen(MiniDisplay.SPEED_PAGE, 'speed', 0)
-		MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "    Km/h", 9, 45)
+		MiniDisplay.ssd.icon_screen(MiniDisplay.SPEED_PAGE, 'speed', 34)
+		MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE+1, "Km/h", 34, 20)
 
-		MiniDisplay.ssd.icon_screen(MiniDisplay.SPEED_PAGE, 'maxspeed', 64)
-		MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "    Km/h", 73, 45)
+		MiniDisplay.ssd.icon_screen(MiniDisplay.SPEED_PAGE, 'maxspeed', 97)
+		MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE+1, "Km/h", 97, 20)
 	
 	def set_rpm(rpm, max_rpm):
 		if max_rpm <= 0:
 			max_rpm = 1000
 			rpm = 10
-		MiniDisplay.ssd.horizontal_bar(MiniDisplay.RPM_PAGE, 20, 107, rpm/max_rpm)
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.RPM_PAGE, 18, 109, rpm/max_rpm)
 	
 	def set_speed(speed):
 		if MiniDisplay.speed_frames_delay < MiniDisplay.FRAMES_DELAY:
 			MiniDisplay.speed_frames_delay += 1
 		elif speed != MiniDisplay.last_speed:
-			MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "{:3d}".format(speed), 10, 20)
+			MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "{:3d}".format(speed), 1, 33, 13, 'b')
 			MiniDisplay.last_speed = speed
 			MiniDisplay.speed_frames_delay = 0
 	
 	def set_max_speed(speed):
 		if speed > MiniDisplay.last_max_speed:
-			MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "{:3d}".format(speed), 74, 20)
+			MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "{:3d}".format(speed), 64, 33, 13, 'b')
 			MiniDisplay.last_max_speed = speed
 	
 	def set_shiftlight(rpm):
