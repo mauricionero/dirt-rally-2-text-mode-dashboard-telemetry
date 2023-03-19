@@ -20,7 +20,7 @@ HIGH_RPM_PERCENTAGE_STEPS = 3
 SEND_EVERY_X_PACKS = 2 # sending once every X packages received, reduce amount of data sent, more stability
 
 SIMULATED_DATA = False # For debugging without real data (fake random data will be generated (with some order))
-FAKE_DATA_INTERVAL = 0.05
+FAKE_DATA_INTERVAL = 0.1
 MORE_RANDOM = False # Totally random data. Useful to test harsh transitions and limits in display
 
 # VISUAL OFFSETS
@@ -35,6 +35,9 @@ INITIAL_SLEEP = 3 # seconds
 
 ## CONFIGURATIONS
 ##################
+
+from mcp23017 import Mcp23017Driver
+from ssd1306 import Ssd1306Driver
 
 import socket
 import time
@@ -701,97 +704,117 @@ class FakeData:
 		return FakeData.last_data
 
 
-# this can become a lib in the future
-class Mcp23017Driver:
-	# positions -> 0 to 7 for the GPIOA0...GPIOA7, 8 to 15 for the GPIOB0...GPIOB7
+class MiniDisplay:
+	ADDRESS = 0x3C
 
-	address = 0x20
-	bus = None
-	GPA = 0
-	GPB = 1
-	mem_inout = {
-		GPA: 0,
-		GPB: 0
-	}
-	inout_dirt = {
-		GPA: False,
-		GPB: False
-	}
-	mem_values = {
-		GPA: 0,
-		GPB: 0
-	}
-	values_dirt = {
-		GPA: False,
-		GPB: False
-	}
+	FRAMES_DELAY = 5
 
-	def __init__(self, smBus, address = 0x20):
-		self.bus = smBus
-		self.address = address
-	
-	def switch_to_output(self, position, set_output = True, dont_sync = False):
-		if position >= 8:
-			GP = self.GPB
-			pin = position - 8
-		else:
-			GP = self.GPA
-			pin = position
-		self.inout_dirt[GP] = True
-		
-		if set_output:
-			self.mem_inout[GP] &= ~(1 << pin)
-		else:
-			self.mem_inout[GP] |= (1 << pin)
-		
-		if dont_sync:
-			return
-		
-		self.sync_data()
-	
-	def set_pin_value(self, position, value, dont_sync = False):
-		if position >= 8:
-			GP = self.GPB
-			pin = position - 8
-		else:
-			GP = self.GPA
-			pin = position
-		self.values_dirt[GP] = True
-		
-		if value:
-			self.mem_values[GP] |= (1 << pin)
-		else:
-			self.mem_values[GP] &= ~(1 << pin)
-		
-		if dont_sync:
-			return
-		
-		self.sync_data()
-	
-	def sync_data(self, force = False):
-		if self.inout_dirt[self.GPA] or force:
-			self.sync_inout(self.GPA)
-		if self.inout_dirt[self.GPB] or force:
-			self.sync_inout(self.GPB)
-		if self.values_dirt[self.GPA] or force:
-			self.sync_values(self.GPA)
-		if self.values_dirt[self.GPB] or force:
-			self.sync_values(self.GPB)
-	
-	def sync_inout(self, gp):
-		command = 0x00 if gp == self.GPA else 0x01
-		self.send_data(command, self.mem_inout[gp])
-		self.inout_dirt[gp] = False
-	
-	def sync_values(self, gp):
-		command = 0x14 if gp == self.GPA else 0x15
-		self.send_data(command, self.mem_values[gp])
-		self.values_dirt[gp] = False
-	
-	def send_data(self, command, value):
-		# print(">", self.address, command, value)
-		self.bus.write_byte_data(self.address, command, value)
+	RPM_PAGE = 0
+	SPEED_PAGE = 1
 
+	ssd = None
+
+	rpm_shift_light = None
+	rpm_shift_light_step = None
+
+	last_shiftlight_state = None
+	last_max_speed = -1
+	last_speed = -1
+	flickr_delay = 0
+	speed_frames_delay = 0
+
+	def setup(smBus = None):
+		if smBus == None:
+			smBus = SMBus(I2C_BUS)
+		MiniDisplay.ssd = Ssd1306Driver(smBus, address=MiniDisplay.ADDRESS)
+
+		MiniDisplay.ssd.set_multiplex_ratio()
+		MiniDisplay.ssd.set_display_offset()
+		MiniDisplay.ssd.set_start_line()
+		MiniDisplay.ssd.set_left_right(False)
+		MiniDisplay.ssd.set_top_bottom(False)
+		MiniDisplay.ssd.set_com_pin_conf()
+		MiniDisplay.ssd.set_contrast()
+		MiniDisplay.ssd.set_display_ram_content()
+		MiniDisplay.ssd.set_display_mode()
+		MiniDisplay.ssd.set_clock()
+		MiniDisplay.ssd.set_charge_pump()
+		MiniDisplay.ssd.set_page_addr_mode()
+
+		MiniDisplay.turn_on()
+
+		MiniDisplay.ssd.reset_cursor()
+	
+	def recalculate_values(max_rpm):
+		MiniDisplay.rpm_shift_light = int(max_rpm - (max_rpm * (HIGH_RPM_PERCENTAGE / 100)))
+		MiniDisplay.rpm_shift_light_step = int(max_rpm * (HIGH_RPM_PERCENTAGE_STEPS / 100))
+
+	def hello():
+		MiniDisplay.ssd.fill_screen()
+		time.sleep(0.6)
+		MiniDisplay.ssd.clear_screen()
+	
+	def turn_on():
+		MiniDisplay.ssd.display_on()
+	
+	def turn_off():
+		MiniDisplay.ssd.display_off()
+	
+	def clear_screen():
+		MiniDisplay.ssd.clear_screen()
+	
+	def draw_background():
+		MiniDisplay.ssd.write_screen(MiniDisplay.RPM_PAGE, 'RPM', 0, 19)
+		MiniDisplay.set_rpm(10, 1000)
+
+		MiniDisplay.ssd.icon_screen(MiniDisplay.SPEED_PAGE, 'speed', 0)
+		MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "    Km/h", 9, 45)
+
+		MiniDisplay.ssd.icon_screen(MiniDisplay.SPEED_PAGE, 'maxspeed', 64)
+		MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "    Km/h", 73, 45)
+	
+	def set_rpm(rpm, max_rpm):
+		if max_rpm <= 0:
+			max_rpm = 1000
+			rpm = 10
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.RPM_PAGE, 20, 107, rpm/max_rpm)
+	
+	def set_speed(speed):
+		if MiniDisplay.speed_frames_delay < MiniDisplay.FRAMES_DELAY:
+			MiniDisplay.speed_frames_delay += 1
+		elif speed != MiniDisplay.last_speed:
+			MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "{:3d}".format(speed), 10, 20)
+			MiniDisplay.last_speed = speed
+			MiniDisplay.speed_frames_delay = 0
+	
+	def set_max_speed(speed):
+		if speed > MiniDisplay.last_max_speed:
+			MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "{:3d}".format(speed), 74, 20)
+			MiniDisplay.last_max_speed = speed
+	
+	def set_shiftlight(rpm):
+		shiftlight_state = False
+
+		if rpm >= MiniDisplay.rpm_shift_light + (MiniDisplay.rpm_shift_light_step * 2):
+			if MiniDisplay.flickr_delay < MiniDisplay.FRAMES_DELAY:
+				shiftlight_state = MiniDisplay.last_shiftlight_state
+				MiniDisplay.flickr_delay += 1
+			elif MiniDisplay.last_shiftlight_state != True:
+				shiftlight_state = True
+				MiniDisplay.flickr_delay = 0
+			else:
+				shiftlight_state = False
+				MiniDisplay.flickr_delay = 0
+		elif rpm >= MiniDisplay.rpm_shift_light + MiniDisplay.rpm_shift_light_step:
+			shiftlight_state = True
+			MiniDisplay.flickr_delay = 0
+		else:
+			MiniDisplay.flickr_delay = 0
+		
+		if shiftlight_state != MiniDisplay.last_shiftlight_state:
+			MiniDisplay.ssd.set_display_mode(shiftlight_state)
+		
+		MiniDisplay.last_shiftlight_state = shiftlight_state
 
 # multi port
 class Mcp23017Calls:
@@ -804,12 +827,13 @@ class Mcp23017Calls:
 
 	mcp = None
 
-	def setup():
+	def setup(smBus = None):
 		# Specify the new address with a keyword parameter if you set any of the A0, A1, A2
 		# mcp = MCP23017(smBus, address=0x20)  # MCP23017 w/ A0 set
 		# For the MCP23017 you specify a pin number from
 		# 0 to 7 for the GPIOA0...GPIOA7, 8 to 15 for the GPIOB0...GPIOB7 pins (i.e. pin 12 is GPIOB4)
-		smBus = SMBus(I2C_BUS)
+		if smBus == None:
+			smBus = SMBus(I2C_BUS)
 		Mcp23017Calls.mcp = Mcp23017Driver(smBus, address=Mcp23017Calls.ADDRESS)
 	
 	def set_pin(position, set_output = True, dont_sync = False):
@@ -1006,16 +1030,22 @@ def main():
 	TelemetryData.setup()
 	Retransmit.setup()
 
-	Mcp23017Calls.setup()
+	smBus = SMBus(I2C_BUS)
+
+	Mcp23017Calls.setup(smBus)
+	MiniDisplay.setup(smBus)
+	
 	ShiftLightLeds.setup()
 	Display7Segments.setup()
 	threading.Thread(target=ShiftLightLeds.hello).start()
 	threading.Thread(target=Display7Segments.hello).start()
+	threading.Thread(target=MiniDisplay.hello).start()
 
 	time.sleep(INITIAL_SLEEP)
 	
 	WindowDraw.setup()
 	WindowDraw.draw_interface()
+	MiniDisplay.draw_background()
 	last_gear = None
 	last_max_rpm = None
 	last_max_speed = 0
@@ -1051,9 +1081,11 @@ def main():
 		if resized:
 			WindowDraw.recalculate_values(infos['idle_rpm'], infos['max_rpm'])
 			WindowDraw.draw_interface()
+			MiniDisplay.recalculate_values(infos['max_rpm'])
 
 		if last_max_rpm != infos['max_rpm'] or WindowDraw.rpm_max_size == 0:
 			WindowDraw.recalculate_values(infos['idle_rpm'], infos['max_rpm'])
+			MiniDisplay.recalculate_values(infos['max_rpm'])
 			last_max_rpm = infos['max_rpm']
 			last_lap_time = 0
 			Display7Segments.set_gear()
@@ -1065,9 +1097,11 @@ def main():
 
 		telemetry.shift_light()
 		WindowDraw.print_shift_light(infos['rpm'])
+		MiniDisplay.set_shiftlight(infos['rpm'])
 
 		WindowDraw.print_rpm(infos['rpm'], infos['max_rpm'], infos['idle_rpm'])
 		WindowDraw.rpm_window.refresh()
+		MiniDisplay.set_rpm(infos['rpm'], infos['max_rpm'])
 		WindowDraw.shiftlight_window[WindowDraw.LEFT].refresh()
 		WindowDraw.shiftlight_window[WindowDraw.RIGHT].refresh()
 
@@ -1081,7 +1115,10 @@ def main():
 		
 		if last_max_speed < infos['speed']:
 			last_max_speed = infos['speed']
+			MiniDisplay.set_max_speed(infos['speed'])
 		infos['max_speed'] = last_max_speed
+
+		MiniDisplay.set_speed(infos['speed'])
 
 		# first lap
 		if infos['completed_laps'] == 0 and infos['lap_time'] > 0:
@@ -1105,8 +1142,10 @@ def main():
 def exit_gracefully(*args):
 	ShiftLightLeds.clear_output()
 	Display7Segments.clear_output()
+	MiniDisplay.turn_off()
 	TelemetryData.sock.close()
-	Retransmit.ss.close()
+	if Retransmit.ss != None:
+		Retransmit.ss.close()
 	exit(0)
 
 if __name__ == '__main__':
