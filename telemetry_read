@@ -20,7 +20,7 @@ HIGH_RPM_PERCENTAGE_STEPS = 3
 SEND_EVERY_X_PACKS = 2 # sending once every X packages received, reduce amount of data sent, more stability
 
 SIMULATED_DATA = False # For debugging without real data (fake random data will be generated (with some order))
-FAKE_DATA_INTERVAL = 0.1
+FAKE_DATA_INTERVAL = 0.05
 MORE_RANDOM = False # Totally random data. Useful to test harsh transitions and limits in display
 
 # VISUAL OFFSETS
@@ -98,7 +98,10 @@ class TelemetryData:
 	G_FORCE_LAT = 34
 	G_FORCE_LON = 35
 	RPM_POS = 37
-	TIRE_PRESSURE_FL = 57
+	BREAK_TEMP_RL = 51
+	BREAK_TEMP_RR = 52
+	BREAK_TEMP_FL = 53
+	BREAK_TEMP_FR = 54
 	COMPLETED_LAPS = 59
 	TOTAL_LAPS = 60
 	TRACK_LENGTH_TOTAL = 61
@@ -167,6 +170,10 @@ class TelemetryData:
 				"g_force_lon": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.G_FORCE_LON), 3),
 				"distance_driven": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.DISTANCE_DRIVEN_LAP) / 1000, 1),
 				"track_length": round(TelemetryData.bit_stream_to_float32(data, TelemetryData.TRACK_LENGTH_TOTAL) / 1000, 1),
+				'break_temp_rl': round(TelemetryData.bit_stream_to_float32(data, TelemetryData.BREAK_TEMP_RL)),
+				'break_temp_rr': round(TelemetryData.bit_stream_to_float32(data, TelemetryData.BREAK_TEMP_RR)),
+				'break_temp_fl': round(TelemetryData.bit_stream_to_float32(data, TelemetryData.BREAK_TEMP_FL)),
+				'break_temp_fr': round(TelemetryData.bit_stream_to_float32(data, TelemetryData.BREAK_TEMP_FR)),
 				"percent_distance": 0,
 				"max_speed": 0
 			}
@@ -619,7 +626,11 @@ class FakeData:
 		"speed_y": 0,
 		"distance_driven": 0,
 		"track_length": 0,
-		"percent_distance": 0
+		"percent_distance": 0,
+		"break_temp_rl": -5,
+		"break_temp_rr": -150,
+		"break_temp_fl": 200,
+		"break_temp_fr": 50
 	}
 		
 	def generate_fake_data():
@@ -679,6 +690,13 @@ class FakeData:
 			FakeData.track_length = random.randrange(3000, 30000, 100)
 			FakeData.distance_driven = 0
 		
+		# break temperatures
+		normal_temp = 40
+		break_temp_fl = FakeData.last_data['break_temp_fl'] + random.randrange(-2, 6, 1) + ((FakeData.last_data['break_temp_fl'] - normal_temp) / 10 * -1)
+		break_temp_fr = FakeData.last_data['break_temp_fr'] + random.randrange(-2, 6, 1) + ((FakeData.last_data['break_temp_fr'] - normal_temp) / 10 * -1)
+		break_temp_rl = FakeData.last_data['break_temp_rl'] + random.randrange(-2, 4, 1) + ((FakeData.last_data['break_temp_rl'] - normal_temp) / 10 * -1)
+		break_temp_rr = FakeData.last_data['break_temp_rr'] + random.randrange(-2, 4, 1) + ((FakeData.last_data['break_temp_rr'] - normal_temp) / 10 * -1)
+		
 		percent_distance = 0 if FakeData.track_length == 0 else int(FakeData.distance_driven / FakeData.track_length * 100)
 		
 		FakeData.last_data = {
@@ -698,7 +716,11 @@ class FakeData:
 			"g_force_lon": g_force_lon,
 			"track_length": round(FakeData.track_length / 1000.0, 1),
 			"distance_driven": round(FakeData.distance_driven / 1000.0, 1),
-			"percent_distance": percent_distance
+			"percent_distance": percent_distance,
+			"break_temp_rl": int(break_temp_rl),
+			"break_temp_rr": int(break_temp_rr),
+			"break_temp_fl": int(break_temp_fl),
+			"break_temp_fr": int(break_temp_fr)
 		}
 
 		return FakeData.last_data
@@ -707,10 +729,12 @@ class FakeData:
 class MiniDisplay:
 	ADDRESS = 0x3C
 
-	FRAMES_DELAY = 5
+	FRAMES_DELAY = 6
 
 	RPM_PAGE = 0
-	SPEED_PAGE = 1
+	SPEED_PAGE = 1 # -> 2
+	TIRE_PAGE = 4
+	TRACK_PAGE = 7
 
 	ssd = None
 
@@ -718,8 +742,9 @@ class MiniDisplay:
 	rpm_shift_light_step = None
 
 	last_shiftlight_state = None
-	last_max_speed = -1
 	last_speed = -1
+	last_driven_distance = -1
+	last_driven_percent = -1
 	flickr_delay = 0
 	speed_frames_delay = 0
 
@@ -766,12 +791,28 @@ class MiniDisplay:
 	def draw_background():
 		MiniDisplay.ssd.write_screen(MiniDisplay.RPM_PAGE, 'RPM', 0, 19)
 		MiniDisplay.set_rpm(10, 1000)
-
+		# speed
 		MiniDisplay.ssd.icon_screen(MiniDisplay.SPEED_PAGE, 'speed', 34)
 		MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE+1, "Km/h", 34, 20)
-
+		# max speed
 		MiniDisplay.ssd.icon_screen(MiniDisplay.SPEED_PAGE, 'maxspeed', 97)
 		MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE+1, "Km/h", 97, 20)
+		# distance
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.TRACK_PAGE, 35, 60, 0.02)
+		MiniDisplay.ssd.write_screen(MiniDisplay.TRACK_PAGE, "Km", 22, 10)
+		MiniDisplay.ssd.write_screen(MiniDisplay.TRACK_PAGE, "Km", 117, 10)
+		# tires
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.TIRE_PAGE, MiniDisplay.tire_display_position[0][2], 8, 1)
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.TIRE_PAGE, MiniDisplay.tire_display_position[1][2], 8, 1)
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.TIRE_PAGE+1, MiniDisplay.tire_display_position[2][2], 8, 1)
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.TIRE_PAGE+1, MiniDisplay.tire_display_position[3][2], 8, 1)
+		
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.TIRE_PAGE, MiniDisplay.tire_display_position[0][2], 8, 0)
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.TIRE_PAGE, MiniDisplay.tire_display_position[1][2], 8, 0)
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.TIRE_PAGE+1, MiniDisplay.tire_display_position[2][2], 8, 0)
+		MiniDisplay.ssd.horizontal_bar(MiniDisplay.TIRE_PAGE+1, MiniDisplay.tire_display_position[3][2], 8, 0)
+		# MiniDisplay.ssd.write_screen(MiniDisplay.TIRE_PAGE, "**", 88, 10)
+		# MiniDisplay.ssd.write_screen(MiniDisplay.TIRE_PAGE+1, "**", 88, 10)
 	
 	def set_rpm(rpm, max_rpm):
 		if max_rpm <= 0:
@@ -779,18 +820,72 @@ class MiniDisplay:
 			rpm = 10
 		MiniDisplay.ssd.horizontal_bar(MiniDisplay.RPM_PAGE, 18, 109, rpm/max_rpm)
 	
-	def set_speed(speed):
-		if MiniDisplay.speed_frames_delay < MiniDisplay.FRAMES_DELAY:
+	def set_speed(speed, force = False):
+		if not force and MiniDisplay.speed_frames_delay < MiniDisplay.FRAMES_DELAY + 2:
 			MiniDisplay.speed_frames_delay += 1
 		elif speed != MiniDisplay.last_speed:
 			MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "{:3d}".format(speed), 1, 33, 13, 'b')
 			MiniDisplay.last_speed = speed
 			MiniDisplay.speed_frames_delay = 0
 	
-	def set_max_speed(speed):
+	tire_skip_process_count = 0
+	last_tire_temp = [0, 0, 0, 0]
+	tire_display_position = [
+		[TIRE_PAGE, 60, 82], [TIRE_PAGE, 104, 93],
+		[TIRE_PAGE + 1, 60, 82], [TIRE_PAGE + 1, 104, 93]
+	]
+	tire_frames_delay = [0, 0, 0, 0]
+	max_break_temp = 300
+	def set_tires(break_temp_fl, break_temp_fr, break_temp_rl, break_temp_rr):
+		if MiniDisplay.tire_skip_process_count < 2:
+			MiniDisplay.tire_skip_process_count += 1
+			return
+		else:
+			MiniDisplay.tire_skip_process_count = 0
+		
+		for i, tire_temp in enumerate([break_temp_fl, break_temp_fr, break_temp_rl, break_temp_rr]):
+			if MiniDisplay.tire_frames_delay[i] < MiniDisplay.FRAMES_DELAY + 5:
+				MiniDisplay.tire_frames_delay[i] += 1
+			elif MiniDisplay.last_tire_temp[i] != tire_temp:
+				if i % 2 == 1:
+					d_tire_temp = str(tire_temp).ljust(4,' ')
+				else:
+					d_tire_temp = "{:4d}".format(tire_temp)
+				MiniDisplay.ssd.write_screen(MiniDisplay.tire_display_position[i][0], d_tire_temp, MiniDisplay.tire_display_position[i][1], 21)
+				MiniDisplay.ssd.horizontal_bar(MiniDisplay.tire_display_position[i][0], MiniDisplay.tire_display_position[i][2], 8, tire_temp/MiniDisplay.max_break_temp)
+				MiniDisplay.last_tire_temp[i] = tire_temp
+				MiniDisplay.tire_frames_delay[i] = 0
+	
+	def set_track_length(track_length):
+		MiniDisplay.ssd.write_screen(MiniDisplay.TRACK_PAGE, str(track_length), 96, 20)
+	
+	def set_distance(driven_distance, percent_distance):
+		if MiniDisplay.last_driven_distance != driven_distance:
+			MiniDisplay.ssd.write_screen(MiniDisplay.TRACK_PAGE, str(driven_distance), 1, 22)
+			MiniDisplay.last_driven_distance = driven_distance
+		if MiniDisplay.last_driven_percent != percent_distance:
+			MiniDisplay.ssd.horizontal_bar(MiniDisplay.TRACK_PAGE, 35, 60, percent_distance/100)
+			MiniDisplay.last_driven_percent = percent_distance
+	
+	max_speed_frames_delay = 0
+	last_max_speed = -1
+	pending_max_speed = False
+	def set_max_speed(speed, reset = False):
+		if reset:
+			MiniDisplay.last_max_speed = -1
+		
 		if speed > MiniDisplay.last_max_speed:
-			MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "{:3d}".format(speed), 64, 33, 13, 'b')
 			MiniDisplay.last_max_speed = speed
+			MiniDisplay.pending_max_speed = True
+		
+		if MiniDisplay.pending_max_speed:
+			if MiniDisplay.max_speed_frames_delay < MiniDisplay.FRAMES_DELAY:
+				MiniDisplay.max_speed_frames_delay += 1
+				return
+			else:
+				MiniDisplay.max_speed_frames_delay = 0
+			MiniDisplay.ssd.write_screen(MiniDisplay.SPEED_PAGE, "{:3d}".format(MiniDisplay.last_max_speed), 64, 33, 13, 'b')
+			MiniDisplay.pending_max_speed = False
 	
 	def set_shiftlight(rpm):
 		shiftlight_state = False
@@ -1086,24 +1181,29 @@ def main():
 		if last_max_rpm != infos['max_rpm'] or WindowDraw.rpm_max_size == 0:
 			WindowDraw.recalculate_values(infos['idle_rpm'], infos['max_rpm'])
 			MiniDisplay.recalculate_values(infos['max_rpm'])
+			MiniDisplay.set_speed(0, True)
 			last_max_rpm = infos['max_rpm']
 			last_lap_time = 0
 			Display7Segments.set_gear()
 			telemetry.recalculate_values()
+			# new race
 			if infos['max_rpm'] != 0:
 				last_max_speed = 0
 				best_lap_time = 0.00
 				last_completed_laps = 0
+				MiniDisplay.set_max_speed(0, True)
+				MiniDisplay.set_track_length(infos['track_length'])
 
 		telemetry.shift_light()
 		WindowDraw.print_shift_light(infos['rpm'])
-		MiniDisplay.set_shiftlight(infos['rpm'])
 
 		WindowDraw.print_rpm(infos['rpm'], infos['max_rpm'], infos['idle_rpm'])
 		WindowDraw.rpm_window.refresh()
-		MiniDisplay.set_rpm(infos['rpm'], infos['max_rpm'])
 		WindowDraw.shiftlight_window[WindowDraw.LEFT].refresh()
 		WindowDraw.shiftlight_window[WindowDraw.RIGHT].refresh()
+
+		MiniDisplay.set_shiftlight(infos['rpm'])
+		MiniDisplay.set_rpm(infos['rpm'], infos['max_rpm'])
 
 		WindowDraw.print_distance(infos['distance_driven'], infos['track_length'], infos['percent_distance'])
 		
@@ -1119,6 +1219,8 @@ def main():
 		infos['max_speed'] = last_max_speed
 
 		MiniDisplay.set_speed(infos['speed'])
+		MiniDisplay.set_distance(infos['distance_driven'], infos['percent_distance'])
+		MiniDisplay.set_tires(infos['break_temp_fl'], infos['break_temp_fr'], infos['break_temp_rl'], infos['break_temp_rr'])
 
 		# first lap
 		if infos['completed_laps'] == 0 and infos['lap_time'] > 0:
